@@ -66,8 +66,8 @@ class StoryPage(BaseModel):
     image_url: Optional[str] = None
 
 class StoryRequest(BaseModel):
-    child_name: str
-    theme: str
+    child_name: str = ""
+    theme: str = ""
     face_image: Optional[str] = None  # Base64 encoded face image
 
 class StoryResponse(BaseModel):
@@ -313,25 +313,55 @@ async def generate_story(
 ):
     """Generate an 8-page pirate story with face-consistent Flapjack-style images."""
     
-    # Check if the request is JSON
-    content_type = request.headers.get('content-type')
-    if content_type and 'application/json' in content_type:
-        try:
-            json_data = await request.json()
-            story_request = StoryRequest(**json_data)
-        except Exception as e:
-            print(f"Error parsing JSON: {str(e)}")
-            raise HTTPException(status_code=400, detail="Invalid JSON format")
-    # Handle form data (for backward compatibility)
-    elif child_name and theme:
-        story_request = StoryRequest(
-            child_name=child_name,
-            theme=theme,
-            face_image=face_image
-        )
+    # Log request details
+    print("\n" + "="*50)
+    print("🔍 Incoming Request Details:")
+    print(f"Method: {request.method}")
+    print(f"URL: {request.url}")
+    print("Headers:", request.headers)
     
-    if not story_request:
-        raise HTTPException(status_code=400, detail="Invalid request format")
+    # Check if the request is JSON
+    content_type = request.headers.get('content-type', '').lower()
+    print(f"Content-Type: {content_type}")
+    
+    try:
+        if 'application/json' in content_type:
+            try:
+                json_data = await request.json()
+                print(f"JSON Body: {json_data}")
+                story_request = StoryRequest(**json_data)
+                print(f"Parsed Request: {story_request}")
+            except Exception as e:
+                print(f"❌ Error parsing JSON: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"Invalid JSON format: {str(e)}")
+        # Handle form data (for backward compatibility)
+        elif child_name and theme:
+            print(f"Form Data - child_name: {child_name}, theme: {theme}, face_image: {'present' if face_image else 'not present'}")
+            story_request = StoryRequest(
+                child_name=child_name,
+                theme=theme,
+                face_image=face_image
+            )
+        else:
+            # Try to get raw body for debugging
+            try:
+                body = await request.body()
+                print(f"Raw Body: {body.decode()}")
+            except Exception as e:
+                print(f"Could not read raw body: {str(e)}")
+            
+            raise HTTPException(status_code=400, detail="Invalid request format: Missing required fields")
+        
+        if not story_request:
+            raise HTTPException(status_code=400, detail="Invalid request format: Could not parse request")
+            
+        print("✅ Request parsed successfully")
+        print("="*50 + "\n")
+        
+    except Exception as e:
+        print(f"❌ Error in request processing: {str(e)}")
+        print("="*50 + "\n")
+        raise
     
     try:
         print(f"Generating pirate story for {story_request.child_name} with theme: {story_request.theme}")
