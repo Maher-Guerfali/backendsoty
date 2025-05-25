@@ -58,12 +58,10 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 STABILITY_API_KEY = os.getenv('STABILITY_API_KEY')
 
-class StoryPage(BaseModel):
-    page_number: int
-    story_text: str
-    page_summary: str
-    image_prompt: str
+class StoryPart(BaseModel):
+    text: str
     image_url: Optional[str] = None
+    image_prompt: Optional[str] = None
 
 class StoryRequest(BaseModel):
     child_name: str = ""
@@ -72,7 +70,7 @@ class StoryRequest(BaseModel):
 
 class StoryResponse(BaseModel):
     title: str
-    pages: List[StoryPage]
+    parts: List[StoryPart]
 
 def generate_pirate_story_with_groq(child_name: str, theme: str):
     """Generate an 8-page pirate story using Groq API."""
@@ -373,31 +371,56 @@ async def generate_story(
         if not story:
             print("Using fallback story")
             story = create_fallback_pirate_story(story_request.child_name)
+        
+        # Generate images for each page if needed
+        if story_request.face_image:
+            image_tasks = []
+            for page in story['pages']:
+                if page.get('image_prompt'):
+                    task = asyncio.create_task(
+                        generate_image_with_face(
+                            page['image_prompt'], 
+                            story_request.face_image, 
+                            story_request.child_name
+                        )
+                    )
+                    image_tasks.append((page, task))
+            
+            # Wait for all images to be generated
+            for page, task in image_tasks:
+                try:
+                    page['image_url'] = await task
+                    print(f"Generated image for page: {'Success' if page.get('image_url') else 'Failed'}")
+                except Exception as e:
+                    print(f"Error generating image: {e}")
+                    page['image_url'] = None
+        
+        # Transform the story to match the frontend's expected format
+        return StoryResponse(
+            title=story.get('title', 'Pirate Adventure'),
+            parts=[
+                StoryPart(
+                    text=page.get('story_text', 'Once upon a time...'),
+                    image_url=page.get('image_url'),
+                    image_prompt=page.get('image_prompt')
+                ) for page in story.get('pages', [])
+            ]
+        )
+        
     except Exception as e:
-        print(f"Error generating story: {str(e)}")
-        story = create_fallback_pirate_story(story_request.child_name)
-    
-    # Generate images for each story page with face consistency
-    image_tasks = []
-    for page in story['pages']:
-        if page['image_prompt']:
-            task = asyncio.create_task(
-                generate_image_with_face(
-                    page['image_prompt'], 
-                    story_request.face_image, 
-                    story_request.child_name
-                )
-            )
-            image_tasks.append((page, task))
-    
-    # Wait for all images to be generated
-    for page, task in image_tasks:
-        try:
-            page['image_url'] = await task
-            print(f"Generated image for page {page['page_number']}: {'Success' if page['image_url'] else 'Failed'}")
-        except Exception as e:
-            print(f"Error generating image for page {page['page_number']}: {e}")
-            page['image_url'] = None
+        print(f"Error in story generation: {str(e)}")
+        # Return a fallback story in the correct format
+        fallback = create_fallback_pirate_story(story_request.child_name if story_request else "Adventurer")
+        return StoryResponse(
+            title=fallback['title'],
+            parts=[
+                StoryPart(
+                    text=page['story_text'],
+                    image_url=page.get('image_url'),
+                    image_prompt=page.get('image_prompt')
+                ) for page in fallback['pages']
+            ]
+        )
     
     return StoryResponse(
         title=story['title'],
