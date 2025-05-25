@@ -305,6 +305,7 @@ def create_fallback_pirate_story(child_name: str):
 
 @app.post("/generate-story", response_model=StoryResponse)
 async def generate_story(
+    request: Request,
     child_name: str = Form(None),
     theme: str = Form(None),
     face_image: str = Form(None),
@@ -312,8 +313,17 @@ async def generate_story(
 ):
     """Generate an 8-page pirate story with face-consistent Flapjack-style images."""
     
-    # Handle form data (same as original)
-    if child_name and theme:
+    # Check if the request is JSON
+    content_type = request.headers.get('content-type')
+    if content_type and 'application/json' in content_type:
+        try:
+            json_data = await request.json()
+            story_request = StoryRequest(**json_data)
+        except Exception as e:
+            print(f"Error parsing JSON: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid JSON format")
+    # Handle form data (for backward compatibility)
+    elif child_name and theme:
         story_request = StoryRequest(
             child_name=child_name,
             theme=theme,
