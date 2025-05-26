@@ -279,30 +279,58 @@ async def generate_image_with_replicate(prompt: str, face_image_b64: Optional[st
         return {"error": error_msg}
 
 async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
-    """Generate image using Stability AI with fallback to Replicate."""
+    """Generate image using available services with detailed error reporting."""
     print("\n=== Starting image generation ===")
     print(f"Prompt: {prompt}")
     
+    # Track which services were attempted and why they failed
+    attempts = []
+    
     # First try Stability AI if key is available
     if STABILITY_API_KEY:
-        print("Trying Stability AI...")
+        print("\n--- Trying Stability AI ---")
         result = await _try_stability_ai(prompt, face_image_b64, child_name)
         if not isinstance(result, dict) or 'error' not in result:
+            print("✓ Successfully generated with Stability AI")
             return result
-        print(f"Stability AI failed: {result.get('error')}")
+        
+        error_msg = f"Stability AI failed: {result.get('error')}"
+        print(f"✗ {error_msg}")
+        attempts.append({"service": "Stability AI", "error": result.get('error')})
+        
+        # If we have a detailed response, log it
+        if 'response' in result:
+            print(f"Stability AI response: {result['response']}")
+    else:
+        attempts.append({"service": "Stability AI", "error": "API key not configured"})
     
     # Fall back to Replicate if Stability AI fails or isn't configured
     if REPLICATE_API_KEY:
-        print("Falling back to Replicate...")
+        print("\n--- Trying Replicate ---")
         result = await generate_image_with_replicate(prompt, face_image_b64, child_name)
         if not isinstance(result, dict) or 'error' not in result:
+            print("✓ Successfully generated with Replicate")
             return result
-        print(f"Replicate failed: {result.get('error')}")
+            
+        error_msg = f"Replicate failed: {result.get('error')}"
+        print(f"✗ {error_msg}")
+        attempts.append({"service": "Replicate", "error": result.get('error')})
+    else:
+        attempts.append({"service": "Replicate", "error": "API key not configured"})
     
-    # If we get here, all providers failed
-    error_msg = "All image generation providers failed"
-    print(error_msg)
-    return {"error": error_msg}
+    # Generate detailed error message
+    error_details = "\n".join([
+        f"- {attempt['service']}: {attempt['error']}" 
+        for attempt in attempts
+    ])
+    
+    if not attempts:
+        final_error = "No image generation services were attempted. Check your API keys."
+    else:
+        final_error = f"All image generation attempts failed. Here's what happened:\n{error_details}"
+    
+    print(f"\n=== Image Generation Failed ===\n{final_error}")
+    return {"error": final_error, "attempts": attempts}
 
 async def _try_stability_ai(prompt: str, face_image_b64: Optional[str], child_name: str) -> Union[str, Dict[str, str]]:
     """Try to generate an image using Stability AI."""
