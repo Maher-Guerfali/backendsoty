@@ -1,20 +1,31 @@
-from fastapi import FastAPI, HTTPException, Request, Form, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Union
-import os
-import json
-import requests
-import traceback
-from dotenv import load_dotenv
 import base64
+import io
+import os
+import traceback
+import uuid
+import json
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel
+import requests
+from PIL import Image, ImageFilter, ImageEnhance
+import numpy as np
+import cv2
+import mediapipe as mp
 from io import BytesIO
-from PIL import Image
 import asyncio
 import replicate
 import time
 
+# Uncomment these if you want to use Hugging Face in the future
+# from diffusers import StableDiffusionInpaintPipeline, StableDiffusionImg2ImgPipeline
+# import torch
+# from transformers import pipeline as hf_pipeline
+
 # Load environment variables
+from dotenv import load_dotenv
 load_dotenv()
 
 # Get allowed origins from environment variable or use default
@@ -23,16 +34,31 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
 app = FastAPI(title="Pirate Story Generator API")
 
 # CORS middleware configuration
-# Allow all origins for now - you can restrict this in production
+# In development, allow all origins for easier debugging
+# In production, you should restrict this to your frontend domain
+is_production = os.getenv('ENVIRONMENT', 'development') == 'production'
+
+# Default allowed origins (for production)
 allowed_origins = [
     "https://mystoria-alpha.vercel.app",
-    "http://localhost:5173",  # Default Vite dev server port
-    "http://localhost:5174",  # Your current dev server port
-    "http://127.0.0.1:5174",  # Localhost IP
-    "http://127.0.0.1:5173",  # Localhost IP alternative
-    "https://mystoria-alpha.vercel.app/",  # With trailing slash
-    "https://mystoria-alpha.vercel.app"   # Without trailing slash
+    "https://mystoria-alpha.vercel.app/",
 ]
+
+# Development origins (added if not in production)
+if not is_production:
+    development_origins = [
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "https://localhost:5173",
+        "https://localhost:5174",
+        "https://127.0.0.1:5173",
+        "https://127.0.0.1:5174",
+    ]
+    allowed_origins.extend(development_origins)
 
 # Add any additional origins from environment variable
 if FRONTEND_URL:
@@ -44,16 +70,20 @@ allowed_origins = list(set(allowed_origins))
 
 # Log allowed origins for debugging
 print("\n" + "="*50)
-
+print(f"Environment: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
+print(f"Frontend URL: {FRONTEND_URL}")
 print(f"Allowed Origins: {json.dumps(allowed_origins, indent=2)}")
 print("="*50 + "\n")
 
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex='https?://.*\.?vercel\.app/?',  # Allow any Vercel deployment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # API settings
@@ -293,7 +323,7 @@ async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], c
         if not isinstance(result, dict) or 'error' not in result:
             print("✓ Successfully generated with Stability AI")
             return result
-        
+            
         error_msg = f"Stability AI failed: {result.get('error')}"
         print(f"✗ {error_msg}")
         attempts.append({"service": "Stability AI", "error": result.get('error')})
