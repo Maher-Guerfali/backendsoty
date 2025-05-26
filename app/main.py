@@ -106,6 +106,12 @@ class StoryRequest(BaseModel):
     theme: str = ""
     face_image: Optional[str] = None  # Base64 encoded face image
 
+class PirateImageRequest(BaseModel):
+    """Request model for pirate image generation"""
+    image_base64: str
+    prompt: str = "Turn this into a pirate-themed image"
+    child_name: str = "pirate"
+
 class StoryResponse(BaseModel):
     title: str
     parts: List[StoryPart]
@@ -661,6 +667,40 @@ async def test_story(name: str, theme: str):
     """Quick test endpoint."""
     request = StoryRequest(child_name=name, theme=theme)
     return await generate_story(story_request=request)
+
+@app.post("/api/generate-pirate-image", response_model=Dict[str, str])
+async def generate_pirate_image(request: PirateImageRequest):
+    """
+    Generate a pirate-themed version of the input image.
+    
+    Parameters:
+    - image_base64: Base64 encoded image data
+    - prompt: Description of how to transform the image (default: pirate theme)
+    - child_name: Name to use for character consistency (default: "pirate")
+    
+    Returns:
+    - Dictionary with the generated image in base64 format
+    """
+    try:
+        # Generate the image using the existing function
+        result = await generate_image_with_face(
+            prompt=request.prompt,
+            face_image_b64=request.image_base64,
+            child_name=request.child_name
+        )
+        
+        if not result or "error" in result:
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("error", "Failed to generate pirate image") if result else "No result from image generation"
+            )
+            
+        return {"image_base64": result.get("image")}
+        
+    except Exception as e:
+        print(f"Error in generate_pirate_image: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to process image: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
