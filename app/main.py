@@ -681,7 +681,25 @@ async def generate_pirate_image(request: PirateImageRequest):
     Returns:
     - Dictionary with the generated image in base64 format
     """
+    print(f"Starting image generation with prompt: {request.prompt}")
+    
+    # Validate base64 data
+    if not request.image_base64 or not request.image_base64.strip():
+        raise HTTPException(status_code=400, detail="No image data provided")
+        
     try:
+        # Try to decode the base64 to verify it's valid
+        try:
+            # Remove data URL prefix if present
+            if "," in request.image_base64:
+                request.image_base64 = request.image_base64.split(",", 1)[1]
+            base64.b64decode(request.image_base64, validate=True)
+        except Exception as e:
+            print(f"Invalid base64 data: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
+            
+        print("Base64 data validated, starting image generation...")
+        
         # Generate the image using the existing function
         result = await generate_image_with_face(
             prompt=request.prompt,
@@ -689,18 +707,43 @@ async def generate_pirate_image(request: PirateImageRequest):
             child_name=request.child_name
         )
         
-        if not result or "error" in result:
+        print(f"Image generation result: {'Success' if result and 'image' in result else 'Failed'}")
+        
+        if not result:
             raise HTTPException(
                 status_code=500,
-                detail=result.get("error", "Failed to generate pirate image") if result else "No result from image generation"
+                detail="No result from image generation service"
             )
             
+        if "error" in result:
+            error_detail = result.get("error", "Unknown error during image generation")
+            print(f"Error in image generation: {error_detail}")
+            raise HTTPException(
+                status_code=500,
+                detail=error_detail
+            )
+            
+        if not result.get("image"):
+            raise HTTPException(
+                status_code=500,
+                detail="Image generation succeeded but no image data was returned"
+            )
+            
+        print("Image generated successfully")
         return {"image_base64": result.get("image")}
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as they are
+        raise
+        
     except Exception as e:
-        print(f"Error in generate_pirate_image: {str(e)}")
+        error_msg = f"Error in generate_pirate_image: {str(e)}"
+        print(error_msg)
         print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to process image: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=error_msg
+        )
 
 if __name__ == "__main__":
     import uvicorn
