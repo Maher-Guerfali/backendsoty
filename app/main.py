@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 import os
 import json
 import requests
+import traceback
 from dotenv import load_dotenv
 import base64
 from io import BytesIO
@@ -192,58 +193,95 @@ def fix_base64_padding(b64_string: str) -> str:
 
 async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
     """Generate image using Stability AI with face consistency and Flapjack style."""
+    print("\n=== Starting image generation ===")
+    print(f"Prompt: {prompt}")
+    
     if not STABILITY_API_KEY:
-        print("No Stability AI API key found")
-        return None
+        error_msg = "No Stability AI API key found"
+        print(error_msg)
+        return {"error": error_msg}
     
     if not face_image_b64:
-        print("No face image provided")
-        return None
+        error_msg = "No face image provided"
+        print(error_msg)
+        return {"error": error_msg}
     
     try:
         # Create the enhanced prompt with Flapjack style
         enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
+        print(f"Enhanced prompt: {enhanced_prompt[:100]}...")  # Print first 100 chars
         
         # Fix base64 padding and remove data URL prefix
-        face_image_b64 = fix_base64_padding(face_image_b64)
+        try:
+            face_image_b64 = fix_base64_padding(face_image_b64)
+            # Decode and validate the image
+            image_data = base64.b64decode(face_image_b64, validate=True)
+            print(f"Successfully decoded image data: {len(image_data)} bytes")
+        except Exception as e:
+            error_msg = f"Error processing image data: {str(e)}"
+            print(error_msg)
+            return {"error": error_msg}
         
-        # Decode and validate the image
-        image_data = base64.b64decode(face_image_b64, validate=True)
+        # Prepare the request data
+        files = {"init_image": ("face.jpg", image_data, "image/jpeg")}
+        data = {
+            "image_strength": 0.4,
+            "init_image_mode": "IMAGE_STRENGTH",
+            "text_prompts[0][text]": enhanced_prompt,
+            "text_prompts[0][weight]": 1.0,
+            "cfg_scale": 8,
+            "samples": 1,
+            "steps": 35,
+            "style_preset": "cartoon"
+        }
         
-        # Use image-to-image to maintain face consistency
+        print("Sending request to Stability AI...")
         response = requests.post(
             "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image",
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {STABILITY_API_KEY}"
             },
-            files={
-                "init_image": ("face.jpg", image_data, "image/jpeg")
-            },
-            data={
-                "image_strength": 0.4,  # Keep face features while allowing style transformation
-                "init_image_mode": "IMAGE_STRENGTH",
-                "text_prompts[0][text]": enhanced_prompt,
-                "text_prompts[0][weight]": 1.0,
-                "cfg_scale": 8,
-                "samples": 1,
-                "steps": 35,
-                "style_preset": "cartoon"  # Use cartoon style preset
-            }
+            files=files,
+            data=data
         )
         
-        response.raise_for_status()
-        result = response.json()
+        print(f"Status code: {response.status_code}")
         
-        if result.get("artifacts"):
-            return f"data:image/png;base64,{result['artifacts'][0]['base64']}"
-        else:
-            print("No artifacts in response")
-            return None
+        try:
+            result = response.json()
+            print(f"Response keys: {list(result.keys())}")
             
+            if not response.ok:
+                error_msg = f"Stability AI API error: {result.get('name', 'Unknown error')} - {result.get('message', 'No error message')}"
+                print(error_msg)
+                return {"error": error_msg}
+            
+            if result.get("artifacts"):
+                print(f"Successfully generated {len(result['artifacts'])} artifacts")
+                if result['artifacts'][0].get('base64'):
+                    return f"data:image/png;base64,{result['artifacts'][0]['base64']}"
+                else:
+                    error_msg = "No base64 data in artifacts"
+            else:
+                error_msg = "No artifacts in response"
+                
+            print(error_msg)
+            return {"error": error_msg}
+            
+        except Exception as e:
+            error_msg = f"Error parsing response: {str(e)}"
+            print(f"{error_msg}\nResponse content: {response.text[:500]}...")
+            return {"error": error_msg, "response": response.text[:500]}
+            
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Request failed: {str(e)}"
+        print(error_msg)
+        return {"error": error_msg}
     except Exception as e:
-        print(f"Stability AI error: {str(e)}")
-        return None
+        error_msg = f"Unexpected error: {str(e)}"
+        print(f"{error_msg}\n{traceback.format_exc()}")
+        return {"error": error_msg}
 
 def create_fallback_pirate_story(child_name: str):
     """Fallback pirate story when API fails."""
@@ -310,117 +348,105 @@ async def generate_story(
     story_request: Optional[StoryRequest] = None
 ):
     """Generate an 8-page pirate story with face-consistent Flapjack-style images."""
-    
-    # Log request details
-    print("\n" + "="*50)
-    print("🔍 Incoming Request Details:")
-    print(f"Method: {request.method}")
-    print(f"URL: {request.url}")
-    print("Headers:", request.headers)
-    
-    # Check if the request is JSON
-    content_type = request.headers.get('content-type', '').lower()
-    print(f"Content-Type: {content_type}")
-    
     try:
-        if 'application/json' in content_type:
-            try:
-                json_data = await request.json()
-                print(f"JSON Body: {json_data}")
-                story_request = StoryRequest(**json_data)
-                print(f"Parsed Request: {story_request}")
-            except Exception as e:
-                print(f"❌ Error parsing JSON: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid JSON format: {str(e)}")
-        # Handle form data (for backward compatibility)
-        elif child_name and theme:
-            print(f"Form Data - child_name: {child_name}, theme: {theme}, face_image: {'present' if face_image else 'not present'}")
-            story_request = StoryRequest(
-                child_name=child_name,
-                theme=theme,
-                face_image=face_image
-            )
-        else:
-            # Try to get raw body for debugging
-            try:
-                body = await request.body()
-                print(f"Raw Body: {body.decode()}")
-            except Exception as e:
-                print(f"Could not read raw body: {str(e)}")
-            
-            raise HTTPException(status_code=400, detail="Invalid request format: Missing required fields")
+        print("\n=== Starting story generation ===")
         
-        if not story_request:
-            raise HTTPException(status_code=400, detail="Invalid request format: Could not parse request")
-            
-        print("✅ Request parsed successfully")
-        print("="*50 + "\n")
+        # Handle both form data and JSON body
+        if not child_name and story_request:
+            child_name = story_request.child_name
+            theme = story_request.theme
+            face_image = story_request.face_image
         
-    except Exception as e:
-        print(f"❌ Error in request processing: {str(e)}")
-        print("="*50 + "\n")
-        raise
-    
-    try:
-        print(f"Generating pirate story for {story_request.child_name} with theme: {story_request.theme}")
-        if story_request.face_image:
-            print(f"Received face image (first 50 chars): {story_request.face_image[:50]}...")
-            
-        # Generate story
-        story = generate_pirate_story_with_groq(story_request.child_name, story_request.theme)
-        if not story:
-            print("Using fallback story")
-            story = create_fallback_pirate_story(story_request.child_name)
+        print(f"Child name: {child_name}")
+        print(f"Theme: {theme}")
+        print(f"Face image provided: {bool(face_image)}")
         
-        # Generate images for each page if needed
-        if story_request.face_image:
-            image_tasks = []
-            for page in story['pages']:
-                if page.get('image_prompt'):
-                    task = asyncio.create_task(
-                        generate_image_with_face(
-                            page['image_prompt'], 
-                            story_request.face_image, 
-                            story_request.child_name
-                        )
-                    )
-                    image_tasks.append((page, task))
-            
-            # Wait for all images to be generated
-            for page, task in image_tasks:
+        if not child_name or not theme:
+            error_msg = "Child name and theme are required"
+            print(f"Validation error: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        # Generate story using Groq
+        print("\nGenerating story with Groq...")
+        try:
+            story = generate_pirate_story_with_groq(child_name, theme)
+            if not story or "pages" not in story:
+                print("No valid story data returned from Groq, using fallback story")
+                story = create_fallback_pirate_story(child_name)
+            print(f"Successfully generated story with {len(story.get('pages', []))} pages")
+        except Exception as e:
+            print(f"Error generating story with Groq: {str(e)}")
+            print(traceback.format_exc())
+            story = create_fallback_pirate_story(child_name)
+        
+        # Process each page to generate images
+        print("\nProcessing pages and generating images...")
+        
+        if face_image:
+            print("Face image detected, generating images with face consistency...")
+            for i, page in enumerate(story.get('pages', [])):
                 try:
-                    page['image_url'] = await task
-                    print(f"Generated image for page: {'Success' if page.get('image_url') else 'Failed'}")
+                    print(f"\n--- Processing page {i+1}/{len(story['pages'])} ---")
+                    print(f"Prompt: {page.get('image_prompt', 'No prompt')}")
+                    
+                    image_result = await generate_image_with_face(
+                        page.get("image_prompt", ""),
+                        face_image,
+                        child_name
+                    )
+                    
+                    if isinstance(image_result, dict) and 'error' in image_result:
+                        print(f"Error generating image: {image_result['error']}")
+                        if 'response' in image_result:
+                            print(f"Response: {image_result['response']}")
+                        page['image_url'] = None
+                    else:
+                        page['image_url'] = image_result
+                        print(f"Successfully generated image for page {i+1}")
+                    
+                    # Add a small delay between image generations
+                    await asyncio.sleep(1)
+                    
                 except Exception as e:
-                    print(f"Error generating image: {e}")
+                    print(f"Error processing page {i+1}: {str(e)}")
+                    print(traceback.format_exc())
                     page['image_url'] = None
         
         # Transform the story to match the frontend's expected format
-        return StoryResponse(
-            title=story.get('title', 'Pirate Adventure'),
-            parts=[
-                StoryPart(
-                    text=page.get('story_text', 'Once upon a time...'),
-                    image_url=page.get('image_url'),
-                    image_prompt=page.get('image_prompt')
-                ) for page in story.get('pages', [])
+        response = {
+            "title": story.get("title", f"{child_name}'s Pirate Adventure"),
+            "parts": [
+                {
+                    "text": page.get("story_text", ""),
+                    "image_url": page.get("image_url"),
+                    "image_prompt": page.get("image_prompt", "")
+                }
+                for page in story.get("pages", [])
             ]
-        )
+        }
         
+        print("\n=== Story generation completed successfully ===")
+        return response
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        print(f"Error in story generation: {str(e)}")
-        # Return a fallback story in the correct format
-        fallback = create_fallback_pirate_story(story_request.child_name if story_request else "Adventurer")
-        return StoryResponse(
-            title=fallback['title'],
-            parts=[
-                StoryPart(
-                    text=page['story_text'],
-                    image_url=page.get('image_url'),
-                    image_prompt=page.get('image_prompt')
-                ) for page in fallback['pages']
+        error_msg = f"Unexpected error in generate_story: {str(e)}"
+        print(f"\n!!! {error_msg}")
+        print(traceback.format_exc())
+        # Return a fallback response instead of 500 to keep the frontend working
+        fallback_story = create_fallback_pirate_story(child_name or "Pirate")
+        return {
+            "title": fallback_story["title"],
+            "parts": [
+                {
+                    "text": page["story_text"],
+                    "image_url": None,
+                    "image_prompt": page.get("image_prompt", "")
+                }
+                for page in fallback_story["pages"]
             ]
-        )
+        }
 
 @app.post("/upload-face")
 async def upload_face(file: UploadFile = File(...)):
@@ -449,6 +475,8 @@ async def upload_face(file: UploadFile = File(...)):
         return {"face_image": f"data:image/jpeg;base64,{face_b64}"}
         
     except Exception as e:
+        print(f"Error in upload_face: {str(e)}")
+        print(traceback.format_exc())
         raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
 
 @app.get("/health")
