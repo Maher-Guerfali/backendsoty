@@ -421,11 +421,6 @@ async def generate_story(
                 ) for page in fallback['pages']
             ]
         )
-    
-    return StoryResponse(
-        title=story['title'],
-        pages=[StoryPage(**page) for page in story['pages']]
-    )
 
 @app.post("/upload-face")
 async def upload_face(file: UploadFile = File(...)):
