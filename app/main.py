@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, Form, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 import os
 import json
 import requests
@@ -11,8 +11,6 @@ import base64
 from io import BytesIO
 from PIL import Image
 import asyncio
-import replicate
-import time
 
 # Load environment variables
 load_dotenv()
@@ -44,7 +42,6 @@ allowed_origins = list(set(allowed_origins))
 
 # Log allowed origins for debugging
 print("\n" + "="*50)
-
 print(f"Allowed Origins: {json.dumps(allowed_origins, indent=2)}")
 print("="*50 + "\n")
 
@@ -60,11 +57,6 @@ app.add_middleware(
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 STABILITY_API_KEY = os.getenv('STABILITY_API_KEY')
-REPLICATE_API_KEY = os.getenv('REPLICATE_API_KEY')
-
-# Configure Replicate
-if REPLICATE_API_KEY:
-    os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_KEY
 
 class StoryPart(BaseModel):
     text: str
@@ -198,159 +190,59 @@ def fix_base64_padding(b64_string: str) -> str:
     
     return b64_string
 
-async def generate_image_with_replicate(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
-    """Generate image using Replicate with face consistency."""
-    print("\n=== Starting Replicate image generation ===")
-    print(f"Prompt: {prompt}")
-    
-    if not REPLICATE_API_KEY:
-        error_msg = "No Replicate API key found"
-        print(error_msg)
-        return {"error": error_msg}
-    
-    if not face_image_b64:
-        error_msg = "No face image provided"
-        print(error_msg)
-        return {"error": error_msg}
-    
-    try:
-        # Create the enhanced prompt with Flapjack style
-        enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
-        print(f"Enhanced prompt: {enhanced_prompt}")
-        
-        # Fix base64 padding and remove data URL prefix
-        try:
-            face_image_b64 = fix_base64_padding(face_image_b64)
-            # Decode the image
-            image_data = base64.b64decode(face_image_b64)
-            print(f"Successfully decoded image data: {len(image_data)} bytes")
-            
-            # Save to a temporary file
-            temp_img_path = "/tmp/face_input.jpg"
-            with open(temp_img_path, "wb") as f:
-                f.write(image_data)
-                
-        except Exception as e:
-            error_msg = f"Error processing image data: {str(e)}"
-            print(error_msg)
-            return {"error": error_msg}
-        
-        print("Sending request to Replicate...")
-        
-        # Run the Replicate model
-        output = replicate.run(
-            "lucataco/sdxl-controlnet:98e043dc665c8fca8dc37668cb847005c4d59ccb45e3d9f4fcb557dcdf670a63",
-            input={
-                "image": open(temp_img_path, "rb"),
-                "prompt": enhanced_prompt,
-                "num_inference_steps": 30,
-                "controlnet_conditioning_scale": 0.8,
-                "guidance_scale": 7.5,
-                "negative_prompt": "blurry, low quality, distorted, disfigured, extra limbs, extra fingers, bad anatomy",
-                "width": 1024,
-                "height": 1024
-            }
-        )
-        
-        print(f"Replicate output: {output}")
-        
-        if not output or not isinstance(output, list) or not output[0]:
-            error_msg = "No valid output from Replicate"
-            print(error_msg)
-            return {"error": error_msg}
-        
-        # Get the image URL from Replicate
-        image_url = output[0]
-        print(f"Successfully generated image at: {image_url}")
-        
-        # Download the image and convert to base64
-        response = requests.get(image_url)
-        if response.status_code == 200:
-            image_base64 = base64.b64encode(response.content).decode('utf-8')
-            return f"data:image/png;base64,{image_base64}"
-        else:
-            error_msg = f"Failed to download image from Replicate: {response.status_code}"
-            print(error_msg)
-            return {"error": error_msg}
-            
-    except Exception as e:
-        error_msg = f"Error with Replicate: {str(e)}"
-        print(f"{error_msg}\n{traceback.format_exc()}")
-        return {"error": error_msg}
-
 async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
-    """Generate image using available services with detailed error reporting."""
-    print("\n=== Starting image generation ===")
-    print(f"Prompt: {prompt}")
+    """Generate image using Stability AI with face consistency and Flapjack style."""
+    print(f"\n=== Starting image generation for {child_name} ===")
+    print(f"Prompt: {prompt[:100]}..." if len(prompt) > 100 else f"Prompt: {prompt}")
     
-    # Track which services were attempted and why they failed
-    attempts = []
+    # Validate API key
+    if not STABILITY_API_KEY:
+        error_msg = "❌ No Stability AI API key found"
+        print(error_msg)
+        return {"error": error_msg}
     
-    # First try Stability AI if key is available
-    if STABILITY_API_KEY:
-        print("\n--- Trying Stability AI ---")
-        result = await _try_stability_ai(prompt, face_image_b64, child_name)
-        if not isinstance(result, dict) or 'error' not in result:
-            print("✓ Successfully generated with Stability AI")
-            return result
-        
-        error_msg = f"Stability AI failed: {result.get('error')}"
-        print(f"✗ {error_msg}")
-        attempts.append({"service": "Stability AI", "error": result.get('error')})
-        
-        # If we have a detailed response, log it
-        if 'response' in result:
-            print(f"Stability AI response: {result['response']}")
-    else:
-        attempts.append({"service": "Stability AI", "error": "API key not configured"})
-    
-    # Fall back to Replicate if Stability AI fails or isn't configured
-    if REPLICATE_API_KEY:
-        print("\n--- Trying Replicate ---")
-        result = await generate_image_with_replicate(prompt, face_image_b64, child_name)
-        if not isinstance(result, dict) or 'error' not in result:
-            print("✓ Successfully generated with Replicate")
-            return result
-            
-        error_msg = f"Replicate failed: {result.get('error')}"
-        print(f"✗ {error_msg}")
-        attempts.append({"service": "Replicate", "error": result.get('error')})
-    else:
-        attempts.append({"service": "Replicate", "error": "API key not configured"})
-    
-    # Generate detailed error message
-    error_details = "\n".join([
-        f"- {attempt['service']}: {attempt['error']}" 
-        for attempt in attempts
-    ])
-    
-    if not attempts:
-        final_error = "No image generation services were attempted. Check your API keys."
-    else:
-        final_error = f"All image generation attempts failed. Here's what happened:\n{error_details}"
-    
-    print(f"\n=== Image Generation Failed ===\n{final_error}")
-    return {"error": final_error, "attempts": attempts}
-
-async def _try_stability_ai(prompt: str, face_image_b64: Optional[str], child_name: str) -> Union[str, Dict[str, str]]:
-    """Try to generate an image using Stability AI."""
+    # Validate face image
     if not face_image_b64:
-        return {"error": "No face image provided"}
+        error_msg = "❌ No face image provided"
+        print(error_msg)
+        return {"error": error_msg}
     
     try:
         # Create the enhanced prompt with Flapjack style
         enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
-        print(f"Enhanced prompt: {enhanced_prompt[:100]}...")  # Print first 100 chars
+        print(f"✓ Enhanced prompt created ({len(enhanced_prompt)} chars)")
         
-        # Fix base64 padding and remove data URL prefix
+        # Process base64 image data
         try:
+            # Remove data URL prefix if present
+            original_length = len(face_image_b64)
+            if face_image_b64.startswith('data:'):
+                comma_index = face_image_b64.find(',')
+                if comma_index != -1:
+                    mime_type = face_image_b64[:comma_index]
+                    face_image_b64 = face_image_b64[comma_index + 1:]
+                    print(f"✓ Removed data URL prefix: {mime_type}")
+            
+            # Fix base64 padding
             face_image_b64 = fix_base64_padding(face_image_b64)
+            
             # Decode and validate the image
             image_data = base64.b64decode(face_image_b64, validate=True)
-            print(f"Successfully decoded image data: {len(image_data)} bytes")
+            print(f"✓ Successfully decoded image: {original_length} → {len(face_image_b64)} → {len(image_data)} bytes")
+            
+            # Validate it's actually an image
+            try:
+                img = Image.open(BytesIO(image_data))
+                print(f"✓ Valid image format: {img.format}, size: {img.size}, mode: {img.mode}")
+            except Exception as img_error:
+                error_msg = f"❌ Invalid image data: {str(img_error)}"
+                print(error_msg)
+                return {"error": error_msg}
+                
         except Exception as e:
-            error_msg = f"Error processing image data: {str(e)}"
+            error_msg = f"❌ Error processing image data: {str(e)}"
             print(error_msg)
+            print(f"Face image preview: {face_image_b64[:100]}...")
             return {"error": error_msg}
         
         # Prepare the request data
@@ -366,53 +258,87 @@ async def _try_stability_ai(prompt: str, face_image_b64: Optional[str], child_na
             "style_preset": "cartoon"
         }
         
-        print("Sending request to Stability AI...")
-        response = requests.post(
-            "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {STABILITY_API_KEY}"
-            },
-            files=files,
-            data=data,
-            timeout=60  # 60 seconds timeout
-        )
-        
-        print(f"Status code: {response.status_code}")
+        print("🚀 Sending request to Stability AI...")
+        print(f"Request data keys: {list(data.keys())}")
         
         try:
-            result = response.json()
-            print(f"Response keys: {list(result.keys())}")
+            response = requests.post(
+                "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image",
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {STABILITY_API_KEY}"
+                },
+                files=files,
+                data=data,
+                timeout=60  # Increased timeout
+            )
             
-            if not response.ok:
-                error_msg = f"Stability AI API error: {result.get('name', 'Unknown error')} - {result.get('message', 'No error message')}"
-                print(error_msg)
-                return {"error": error_msg}
+            print(f"📡 Response status: {response.status_code}")
             
-            if result.get("artifacts"):
-                print(f"Successfully generated {len(result['artifacts'])} artifacts")
-                if result['artifacts'][0].get('base64'):
-                    return f"data:image/png;base64,{result['artifacts'][0]['base64']}"
-                else:
-                    error_msg = "No base64 data in artifacts"
-            else:
-                error_msg = "No artifacts in response"
-                
+        except requests.exceptions.Timeout:
+            error_msg = "❌ Request timed out after 60 seconds"
             print(error_msg)
             return {"error": error_msg}
+        except requests.exceptions.RequestException as e:
+            error_msg = f"❌ Request failed: {str(e)}"
+            print(error_msg)
+            return {"error": error_msg}
+        
+        # Parse response
+        try:
+            result = response.json()
+            print(f"📋 Response keys: {list(result.keys())}")
+            
+            if not response.ok:
+                error_details = {
+                    'status_code': response.status_code,
+                    'error_name': result.get('name', 'Unknown'),
+                    'error_message': result.get('message', 'No message'),
+                    'errors': result.get('errors', [])
+                }
+                error_msg = f"❌ Stability AI API error ({response.status_code}): {error_details['error_name']} - {error_details['error_message']}"
+                print(error_msg)
+                if error_details['errors']:
+                    print(f"Additional errors: {error_details['errors']}")
+                return {"error": error_msg, "details": error_details}
+            
+            # Check for artifacts
+            artifacts = result.get("artifacts", [])
+            if not artifacts:
+                error_msg = "❌ No artifacts in successful response"
+                print(error_msg)
+                print(f"Full response: {result}")
+                return {"error": error_msg}
+            
+            # Get the first artifact
+            artifact = artifacts[0]
+            if not artifact.get('base64'):
+                error_msg = "❌ No base64 data in artifact"
+                print(error_msg)
+                print(f"Artifact keys: {list(artifact.keys())}")
+                return {"error": error_msg}
+            
+            # Success!
+            image_b64 = artifact['base64']
+            print(f"✅ Successfully generated image ({len(image_b64)} base64 chars)")
+            return f"data:image/png;base64,{image_b64}"
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"❌ Failed to parse JSON response: {str(e)}"
+            print(error_msg)
+            print(f"Response content preview: {response.text[:500]}...")
+            return {"error": error_msg, "response_preview": response.text[:500]}
             
         except Exception as e:
-            error_msg = f"Error parsing response: {str(e)}"
-            print(f"{error_msg}\nResponse content: {response.text[:500]}...")
-            return {"error": error_msg, "response": response.text[:500]}
+            error_msg = f"❌ Error parsing response: {str(e)}"
+            print(error_msg)
+            print(f"Response content preview: {response.text[:500]}...")
+            return {"error": error_msg, "response_preview": response.text[:500]}
             
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Request failed: {str(e)}"
-        print(error_msg)
-        return {"error": error_msg}
     except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}"
-        print(f"{error_msg}\n{traceback.format_exc()}")
+        error_msg = f"❌ Unexpected error: {str(e)}"
+        print(f"{error_msg}")
+        print(f"Traceback: {traceback.format_exc()}")
         return {"error": error_msg}
 
 def create_fallback_pirate_story(child_name: str):
@@ -472,35 +398,60 @@ def create_fallback_pirate_story(child_name: str):
     }
 
 @app.post("/generate-story", response_model=StoryResponse)
-async def generate_story(
-    request: Request,
-    child_name: str = Form(None),
-    theme: str = Form(None),
-    face_image: str = Form(None)
-):
+async def generate_story(request: Request):
     """Generate an 8-page pirate story with face-consistent Flapjack-style images."""
     try:
         print("\n=== Starting story generation ===")
         
-        # Try to get JSON data if form data is not provided
-        content_type = request.headers.get('content-type', '')
-        if not child_name or not theme and 'application/json' in content_type:
+        # Initialize variables
+        child_name = None
+        theme = None
+        face_image = None
+        
+        # Handle different content types
+        content_type = request.headers.get('content-type', '').lower()
+        print(f"Content-Type: {content_type}")
+        
+        if 'application/json' in content_type:
+            # Handle JSON request
             try:
                 json_data = await request.json()
-                child_name = json_data.get('child_name') or child_name
-                theme = json_data.get('theme') or theme
-                face_image = json_data.get('face_image', face_image)
+                child_name = json_data.get('child_name')
+                theme = json_data.get('theme')
+                face_image = json_data.get('face_image')
+                print("✓ Parsed JSON request")
             except Exception as e:
-                print(f"Error parsing JSON data: {str(e)}")
+                print(f"Error parsing JSON: {e}")
+                raise HTTPException(status_code=400, detail="Invalid JSON data")
         
-        print(f"Child name: {child_name}")
-        print(f"Theme: {theme}")
+        elif 'multipart/form-data' in content_type or 'application/x-www-form-urlencoded' in content_type:
+            # Handle form data
+            try:
+                form_data = await request.form()
+                child_name = form_data.get('child_name')
+                theme = form_data.get('theme')
+                face_image = form_data.get('face_image')
+                print("✓ Parsed form data")
+            except Exception as e:
+                print(f"Error parsing form data: {e}")
+                raise HTTPException(status_code=400, detail="Invalid form data")
+        
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported content type")
+        
+        # Debug output
+        print(f"=== PARSED DATA ===")
+        print(f"Child name: '{child_name}'")
+        print(f"Theme: '{theme}'")
         print(f"Face image provided: {bool(face_image)}")
+        if face_image:
+            print(f"Face image length: {len(face_image)}")
+            print(f"Face image starts with: {face_image[:50]}...")
+        print("=" * 20)
         
+        # Validate required fields
         if not child_name or not theme:
-            error_msg = "Child name and theme are required"
-            print(f"Validation error: {error_msg}")
-            raise HTTPException(status_code=400, detail=error_msg)
+            raise HTTPException(status_code=400, detail="Child name and theme are required")
         
         # Generate story using Groq
         print("\nGenerating story with Groq...")
@@ -532,23 +483,23 @@ async def generate_story(
                     )
                     
                     if isinstance(image_result, dict) and 'error' in image_result:
-                        print(f"Error generating image: {image_result['error']}")
-                        if 'response' in image_result:
-                            print(f"Response: {image_result['response']}")
-                        # Set a placeholder image URL instead of None
-                        page['image_url'] = "https://via.placeholder.com/1024x1024?text=Image+Generation+Failed"
+                        print(f"❌ Error generating image: {image_result['error']}")
+                        if 'response_preview' in image_result:
+                            print(f"API Response preview: {image_result['response_preview']}")
+                        page['image_url'] = None
                     else:
                         page['image_url'] = image_result
-                        print(f"Successfully generated image for page {i+1}")
+                        print(f"✅ Successfully generated image for page {i+1}")
                     
                     # Add a small delay between image generations
                     await asyncio.sleep(1)
                     
                 except Exception as e:
-                    print(f"Error processing page {i+1}: {str(e)}")
+                    print(f"❌ Error processing page {i+1}: {str(e)}")
                     print(traceback.format_exc())
-                    # Set a placeholder image URL instead of None
-                    page['image_url'] = "https://via.placeholder.com/1024x1024?text=Image+Generation+Error"
+                    page['image_url'] = None
+        else:
+            print("⚠️ No face image provided, skipping image generation")
         
         # Transform the story to match the frontend's expected format
         response = {
@@ -563,7 +514,11 @@ async def generate_story(
             ]
         }
         
-        print("\n=== Story generation completed successfully ===")
+        print(f"\n=== Story generation completed ===")
+        print(f"Generated {len(response['parts'])} parts")
+        images_generated = sum(1 for part in response['parts'] if part['image_url'])
+        print(f"Images successfully generated: {images_generated}/{len(response['parts'])}")
+        
         return response
         
     except HTTPException:
@@ -585,6 +540,34 @@ async def generate_story(
                 for page in fallback_story["pages"]
             ]
         }
+
+@app.post("/test-image")
+async def test_image_generation(request: Request):
+    """Test image generation with detailed logging."""
+    try:
+        data = await request.json()
+        face_image = data.get('face_image')
+        
+        if not face_image:
+            return {"error": "No face_image provided"}
+        
+        print(f"Testing image generation...")
+        print(f"Face image length: {len(face_image)}")
+        print(f"Starts with data URL: {face_image.startswith('data:')}")
+        
+        result = await generate_image_with_face(
+            "Young pirate child standing on beach, cartoon style",
+            face_image,
+            "TestChild"
+        )
+        
+        if isinstance(result, dict) and 'error' in result:
+            return {"success": False, "error": result}
+        else:
+            return {"success": True, "image_generated": bool(result)}
+            
+    except Exception as e:
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
 
 @app.post("/upload-face")
 async def upload_face(file: UploadFile = File(...)):
