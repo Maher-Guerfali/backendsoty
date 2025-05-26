@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, Form, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import os
 import json
 import requests
@@ -11,6 +11,8 @@ import base64
 from io import BytesIO
 from PIL import Image
 import asyncio
+import replicate
+import time
 
 # Load environment variables
 load_dotenv()
@@ -58,6 +60,11 @@ app.add_middleware(
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 STABILITY_API_KEY = os.getenv('STABILITY_API_KEY')
+REPLICATE_API_KEY = os.getenv('REPLICATE_API_KEY')
+
+# Configure Replicate
+if REPLICATE_API_KEY:
+    os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_KEY
 
 class StoryPart(BaseModel):
     text: str
@@ -191,13 +198,13 @@ def fix_base64_padding(b64_string: str) -> str:
     
     return b64_string
 
-async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
-    """Generate image using Stability AI with face consistency and Flapjack style."""
-    print("\n=== Starting image generation ===")
+async def generate_image_with_replicate(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
+    """Generate image using Replicate with face consistency."""
+    print("\n=== Starting Replicate image generation ===")
     print(f"Prompt: {prompt}")
     
-    if not STABILITY_API_KEY:
-        error_msg = "No Stability AI API key found"
+    if not REPLICATE_API_KEY:
+        error_msg = "No Replicate API key found"
         print(error_msg)
         return {"error": error_msg}
     
@@ -205,6 +212,102 @@ async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], c
         error_msg = "No face image provided"
         print(error_msg)
         return {"error": error_msg}
+    
+    try:
+        # Create the enhanced prompt with Flapjack style
+        enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
+        print(f"Enhanced prompt: {enhanced_prompt}")
+        
+        # Fix base64 padding and remove data URL prefix
+        try:
+            face_image_b64 = fix_base64_padding(face_image_b64)
+            # Decode the image
+            image_data = base64.b64decode(face_image_b64)
+            print(f"Successfully decoded image data: {len(image_data)} bytes")
+            
+            # Save to a temporary file
+            temp_img_path = "/tmp/face_input.jpg"
+            with open(temp_img_path, "wb") as f:
+                f.write(image_data)
+                
+        except Exception as e:
+            error_msg = f"Error processing image data: {str(e)}"
+            print(error_msg)
+            return {"error": error_msg}
+        
+        print("Sending request to Replicate...")
+        
+        # Run the Replicate model
+        output = replicate.run(
+            "lucataco/sdxl-controlnet:98e043dc665c8fca8dc37668cb847005c4d59ccb45e3d9f4fcb557dcdf670a63",
+            input={
+                "image": open(temp_img_path, "rb"),
+                "prompt": enhanced_prompt,
+                "num_inference_steps": 30,
+                "controlnet_conditioning_scale": 0.8,
+                "guidance_scale": 7.5,
+                "negative_prompt": "blurry, low quality, distorted, disfigured, extra limbs, extra fingers, bad anatomy",
+                "width": 1024,
+                "height": 1024
+            }
+        )
+        
+        print(f"Replicate output: {output}")
+        
+        if not output or not isinstance(output, list) or not output[0]:
+            error_msg = "No valid output from Replicate"
+            print(error_msg)
+            return {"error": error_msg}
+        
+        # Get the image URL from Replicate
+        image_url = output[0]
+        print(f"Successfully generated image at: {image_url}")
+        
+        # Download the image and convert to base64
+        response = requests.get(image_url)
+        if response.status_code == 200:
+            image_base64 = base64.b64encode(response.content).decode('utf-8')
+            return f"data:image/png;base64,{image_base64}"
+        else:
+            error_msg = f"Failed to download image from Replicate: {response.status_code}"
+            print(error_msg)
+            return {"error": error_msg}
+            
+    except Exception as e:
+        error_msg = f"Error with Replicate: {str(e)}"
+        print(f"{error_msg}\n{traceback.format_exc()}")
+        return {"error": error_msg}
+
+async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
+    """Generate image using Stability AI with fallback to Replicate."""
+    print("\n=== Starting image generation ===")
+    print(f"Prompt: {prompt}")
+    
+    # First try Stability AI if key is available
+    if STABILITY_API_KEY:
+        print("Trying Stability AI...")
+        result = await _try_stability_ai(prompt, face_image_b64, child_name)
+        if not isinstance(result, dict) or 'error' not in result:
+            return result
+        print(f"Stability AI failed: {result.get('error')}")
+    
+    # Fall back to Replicate if Stability AI fails or isn't configured
+    if REPLICATE_API_KEY:
+        print("Falling back to Replicate...")
+        result = await generate_image_with_replicate(prompt, face_image_b64, child_name)
+        if not isinstance(result, dict) or 'error' not in result:
+            return result
+        print(f"Replicate failed: {result.get('error')}")
+    
+    # If we get here, all providers failed
+    error_msg = "All image generation providers failed"
+    print(error_msg)
+    return {"error": error_msg}
+
+async def _try_stability_ai(prompt: str, face_image_b64: Optional[str], child_name: str) -> Union[str, Dict[str, str]]:
+    """Try to generate an image using Stability AI."""
+    if not face_image_b64:
+        return {"error": "No face image provided"}
     
     try:
         # Create the enhanced prompt with Flapjack style
@@ -243,7 +346,8 @@ async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], c
                 "Authorization": f"Bearer {STABILITY_API_KEY}"
             },
             files=files,
-            data=data
+            data=data,
+            timeout=60  # 60 seconds timeout
         )
         
         print(f"Status code: {response.status_code}")
@@ -403,7 +507,8 @@ async def generate_story(
                         print(f"Error generating image: {image_result['error']}")
                         if 'response' in image_result:
                             print(f"Response: {image_result['response']}")
-                        page['image_url'] = None
+                        # Set a placeholder image URL instead of None
+                        page['image_url'] = "https://via.placeholder.com/1024x1024?text=Image+Generation+Failed"
                     else:
                         page['image_url'] = image_result
                         print(f"Successfully generated image for page {i+1}")
@@ -414,7 +519,8 @@ async def generate_story(
                 except Exception as e:
                     print(f"Error processing page {i+1}: {str(e)}")
                     print(traceback.format_exc())
-                    page['image_url'] = None
+                    # Set a placeholder image URL instead of None
+                    page['image_url'] = "https://via.placeholder.com/1024x1024?text=Image+Generation+Error"
         
         # Transform the story to match the frontend's expected format
         response = {
