@@ -344,18 +344,22 @@ async def generate_story(
     request: Request,
     child_name: str = Form(None),
     theme: str = Form(None),
-    face_image: str = Form(None),
-    story_request: Optional[StoryRequest] = None
+    face_image: str = Form(None)
 ):
     """Generate an 8-page pirate story with face-consistent Flapjack-style images."""
     try:
         print("\n=== Starting story generation ===")
         
-        # Handle both form data and JSON body
-        if not child_name and story_request:
-            child_name = story_request.child_name
-            theme = story_request.theme
-            face_image = story_request.face_image
+        # Try to get JSON data if form data is not provided
+        content_type = request.headers.get('content-type', '')
+        if not child_name or not theme and 'application/json' in content_type:
+            try:
+                json_data = await request.json()
+                child_name = json_data.get('child_name') or child_name
+                theme = json_data.get('theme') or theme
+                face_image = json_data.get('face_image', face_image)
+            except Exception as e:
+                print(f"Error parsing JSON data: {str(e)}")
         
         print(f"Child name: {child_name}")
         print(f"Theme: {theme}")
