@@ -2,6 +2,7 @@ from typing import List, Optional, Dict, Any, Union
 import base64
 import io
 import os
+import sys
 import traceback
 import uuid
 import json
@@ -10,14 +11,31 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 import requests
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageFilter, ImageEnhance, UnidentifiedImageError
 import numpy as np
-import cv2
-import mediapipe as mp
 from io import BytesIO
 import asyncio
 import replicate
 import time
+
+# Optional imports with error handling
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    print("Warning: OpenCV not available. Some features may be limited.")
+
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    MEDIAPIPE_AVAILABLE = False
+    print("Warning: MediaPipe not available. Face detection features will be limited.")
+
+# Set numpy to ignore some warnings
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 # Uncomment these if you want to use Hugging Face in the future
 # from diffusers import StableDiffusionInpaintPipeline, StableDiffusionImg2ImgPipeline
@@ -314,10 +332,21 @@ async def generate_image_with_replicate(prompt: str, face_image_b64: Optional[st
         print(f"{error_msg}\n{traceback.format_exc()}")
         return {"error": error_msg}
 
-async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
-    """Generate image using available services with detailed error reporting."""
+async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], child_name: str) -> Dict[str, Any]:
+    """
+    Generate image using available services with detailed error reporting.
+    Returns a dictionary with either 'image' (base64) or 'error' key.
+    """
     print("\n=== Starting image generation ===")
     print(f"Prompt: {prompt}")
+    
+    # Check if we have face image but can't process it
+    if face_image_b64 and (not CV2_AVAILABLE or not MEDIAPIPE_AVAILABLE):
+        print("Warning: Face processing requires OpenCV and MediaPipe. Face consistency will be limited.")
+        if not CV2_AVAILABLE:
+            print("- OpenCV is not installed. Install with: pip install opencv-python-headless")
+        if not MEDIAPIPE_AVAILABLE:
+            print("- MediaPipe is not installed. Install with: pip install mediapipe")
     
     # Track which services were attempted and why they failed
     attempts = []
@@ -325,18 +354,23 @@ async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], c
     # First try Stability AI if key is available
     if STABILITY_API_KEY:
         print("\n--- Trying Stability AI ---")
-        result = await _try_stability_ai(prompt, face_image_b64, child_name)
-        if not isinstance(result, dict) or 'error' not in result:
-            print("✓ Successfully generated with Stability AI")
-            return result
+        try:
+            result = await _try_stability_ai(prompt, face_image_b64, child_name)
+            if result and not isinstance(result, dict) or 'error' not in result:
+                print("✓ Successfully generated with Stability AI")
+                return {"image": result}
+                
+            error_msg = f"Stability AI failed: {result.get('error') if result else 'No result'}"
+            print(f"✗ {error_msg}")
+            attempts.append({"service": "Stability AI", "error": str(error_msg)})
             
-        error_msg = f"Stability AI failed: {result.get('error')}"
-        print(f"✗ {error_msg}")
-        attempts.append({"service": "Stability AI", "error": result.get('error')})
-        
-        # If we have a detailed response, log it
-        if 'response' in result:
-            print(f"Stability AI response: {result['response']}")
+            # If we have a detailed response, log it
+            if result and 'response' in result:
+                print(f"Stability AI response: {result['response']}")
+        except Exception as e:
+            error_msg = f"Error with Stability AI: {str(e)}"
+            print(f"✗ {error_msg}")
+            attempts.append({"service": "Stability AI", "error": str(e)})
     else:
         attempts.append({"service": "Stability AI", "error": "API key not configured"})
     
