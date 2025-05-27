@@ -78,12 +78,7 @@ if FRONTEND_URL:
 # Remove duplicates
 allowed_origins = list(set(allowed_origins))
 
-# Log allowed origins for debugging
-print("\n" + "="*50)
-print(f"Environment: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
-print(f"Frontend URL: {FRONTEND_URL}")
-print(f"Allowed Origins: {json.dumps(allowed_origins, indent=2)}")
-print("="*50 + "\n")
+# Logging is handled by the production logging system
 
 # Add CORS middleware
 app.add_middleware(
@@ -130,7 +125,7 @@ class StoryResponse(BaseModel):
 
 def generate_pirate_story_with_groq(child_name: str, theme: str):
     """Generate an 8-page pirate story using Groq API."""
-    print(f"\n=== Generating pirate story for Captain {child_name} ===")
+    # Generate pirate story using Groq API
     
     prompt = f"""Create an 8-page children's pirate adventure story about {child_name}. 
 
@@ -180,7 +175,7 @@ Focus on: {child_name}'s actions, the environment, other characters, objects in 
         result = response.json()
         
         if 'error' in result:
-            print(f"API Error: {result['error']}")
+            pass
             return None
             
         if 'choices' not in result or not result['choices']:
