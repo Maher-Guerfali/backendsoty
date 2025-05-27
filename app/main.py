@@ -6,32 +6,24 @@ import sys
 import traceback
 import uuid
 import json
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from pydantic import BaseModel, Field, Json
 import requests
-from PIL import Image, ImageFilter, ImageEnhance, UnidentifiedImageError
-import numpy as np
+from PIL import Image, UnidentifiedImageError
 from io import BytesIO
 import asyncio
 import replicate
 import time
+import httpx
+import json
 
-# Optional imports with error handling
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
-    print("Warning: OpenCV not available. Some features may be limited.")
+# In-memory storage for story state (in a real app, use a database)
+story_states = {}
 
-try:
-    import mediapipe as mp
-    MEDIAPIPE_AVAILABLE = True
-except ImportError:
-    MEDIAPIPE_AVAILABLE = False
-    print("Warning: MediaPipe not available. Face detection features will be limited.")
+# WebSocket connections for real-time updates
+active_connections = {}
 
 # Set numpy to ignore some warnings
 import warnings
@@ -118,6 +110,8 @@ class StoryPart(BaseModel):
     text: str
     image_url: Optional[str] = None
     image_prompt: Optional[str] = None
+    image_status: str = "pending"  # pending, processing, completed, failed
+    error: Optional[str] = None
 
 class StoryRequest(BaseModel):
     child_name: str = ""
@@ -252,77 +246,42 @@ def fix_base64_padding(b64_string: str) -> str:
     
     return b64_string
 
-async def generate_image_with_replicate(prompt: str, face_image_b64: Optional[str], child_name: str) -> Optional[str]:
-    """Generate image using Replicate with face consistency."""
-    print("\n=== Starting Replicate image generation ===")
-    print(f"Prompt: {prompt}")
-    
+async def generate_image_with_replicate(prompt: str, child_name: str) -> Optional[Dict[str, Any]]:
+    """Generate an image using Replicate API asynchronously."""
     if not REPLICATE_API_KEY:
-        error_msg = "No Replicate API key found"
-        print(error_msg)
-        return {"error": error_msg}
-    
-    if not face_image_b64:
-        error_msg = "No face image provided"
-        print(error_msg)
-        return {"error": error_msg}
-    
+        return None
+        
     try:
-        # Create the enhanced prompt with Flapjack style
+        # Enhance the prompt with Flapjack style
         enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
-        print(f"Enhanced prompt: {enhanced_prompt}")
+        print(f"\n=== Generating image with Replicate ===")
+        print(f"Prompt: {enhanced_prompt}")
         
-        # Fix base64 padding and remove data URL prefix
-        try:
-            face_image_b64 = fix_base64_padding(face_image_b64)
-            # Decode the image
-            image_data = base64.b64decode(face_image_b64)
-            print(f"Successfully decoded image data: {len(image_data)} bytes")
-            
-            # Save to a temporary file
-            temp_img_path = "/tmp/face_input.jpg"
-            with open(temp_img_path, "wb") as f:
-                f.write(image_data)
-                
-        except Exception as e:
-            error_msg = f"Error processing image data: {str(e)}"
-            print(error_msg)
-            return {"error": error_msg}
-        
-        print("Sending request to Replicate...")
-        
-        # Run the Replicate model
-        output = replicate.run(
-            "lucataco/sdxl-controlnet:98e043dc665c8fca8dc37668cb847005c4d59ccb45e3d9f4fcb557dcdf670a63",
+        # Use SDXL for image generation
+        output = await asyncio.to_thread(
+            replicate.run,
+            "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
             input={
-                "image": open(temp_img_path, "rb"),
                 "prompt": enhanced_prompt,
-                "num_inference_steps": 30,
-                "controlnet_conditioning_scale": 0.8,
-                "guidance_scale": 7.5,
-                "negative_prompt": "blurry, low quality, distorted, disfigured, extra limbs, extra fingers, bad anatomy",
                 "width": 1024,
-                "height": 1024
+                "height": 1024,
+                "num_outputs": 1,
+                "num_inference_steps": 30,
+                "guidance_scale": 7.5,
+                "negative_prompt": "low quality, blurry, distorted, bad anatomy, bad proportions, extra limbs, cropped, cut off, text, watermark, signature, jpeg artifacts",
             }
         )
         
-        print(f"Replicate output: {output}")
-        
-        if not output or not isinstance(output, list) or not output[0]:
-            error_msg = "No valid output from Replicate"
-            print(error_msg)
-            return {"error": error_msg}
-        
-        # Get the image URL from Replicate
-        image_url = output[0]
-        print(f"Successfully generated image at: {image_url}")
-        
-        # Download the image and convert to base64
-        response = requests.get(image_url)
-        if response.status_code == 200:
-            image_base64 = base64.b64encode(response.content).decode('utf-8')
-            return f"data:image/png;base64,{image_base64}"
-        else:
+        if isinstance(output, list) and len(output) > 0:
+            # Download the image asynchronously
+            async with httpx.AsyncClient() as client:
+                response = await client.get(output[0])
+                if response.status_code == 200:
+                    return {
+                        "image": base64.b64encode(response.content).decode('utf-8'),
+                        "source": "replicate-sdxl"
+                    }
+                    
             error_msg = f"Failed to download image from Replicate: {response.status_code}"
             print(error_msg)
             return {"error": error_msg}
@@ -541,120 +500,71 @@ def create_fallback_pirate_story(child_name: str):
         ]
     }
 
-@app.post("/generate-story", response_model=StoryResponse)
+@app.post("/generate-story")
 async def generate_story(
-    request: Request,
+    background_tasks: BackgroundTasks,
     child_name: str = Form(None),
     theme: str = Form(None),
     face_image: str = Form(None)
 ):
-    """Generate an 8-page pirate story with face-consistent Flapjack-style images."""
-    try:
-        print("\n=== Starting story generation ===")
+    """Generate an 8-page pirate story with Flapjack-style images.
+    
+    This endpoint starts the story generation process and returns immediately with the story text.
+    Images are generated asynchronously in the background.
+    """
+    print("\n=== Starting story generation ===")
+    print(f"Child name: {child_name}")
+    print(f"Theme: {theme}")
+    
+    # Validate inputs
+    if not child_name or not theme:
+        raise HTTPException(status_code=400, detail="Child name and theme are required")
+    
+    # Generate the story text
+    print("Generating story text...")
+    story_data = generate_pirate_story_with_groq(child_name, theme)
+    
+    if not story_data:
+        print("Using fallback story")
+        story_data = create_fallback_pirate_story(child_name)
+    
+    # Create story parts with initial state
+    parts = []
+    story_id = str(uuid.uuid4())
+    
+    for i, page in enumerate(story_data["pages"][:8]):  # Limit to 8 pages
+        image_prompt = page.get("image_prompt", "") if isinstance(page, dict) else ""
         
-        # Try to get JSON data if form data is not provided
-        content_type = request.headers.get('content-type', '')
-        if not child_name or not theme and 'application/json' in content_type:
-            try:
-                json_data = await request.json()
-                child_name = json_data.get('child_name') or child_name
-                theme = json_data.get('theme') or theme
-                face_image = json_data.get('face_image', face_image)
-            except Exception as e:
-                print(f"Error parsing JSON data: {str(e)}")
+        part = StoryPart(
+            text=page["story_text"] if isinstance(page, dict) else page,
+            image_prompt=image_prompt,
+            image_status="pending"
+        )
+        parts.append(part)
         
-        print(f"Child name: {child_name}")
-        print(f"Theme: {theme}")
-        print(f"Face image provided: {bool(face_image)}")
-        
-        if not child_name or not theme:
-            error_msg = "Child name and theme are required"
-            print(f"Validation error: {error_msg}")
-            raise HTTPException(status_code=400, detail=error_msg)
-        
-        # Generate story using Groq
-        print("\nGenerating story with Groq...")
-        try:
-            story = generate_pirate_story_with_groq(child_name, theme)
-            if not story or "pages" not in story:
-                print("No valid story data returned from Groq, using fallback story")
-                story = create_fallback_pirate_story(child_name)
-            print(f"Successfully generated story with {len(story.get('pages', []))} pages")
-        except Exception as e:
-            print(f"Error generating story with Groq: {str(e)}")
-            print(traceback.format_exc())
-            story = create_fallback_pirate_story(child_name)
-        
-        # Process each page to generate images
-        print("\nProcessing pages and generating images...")
-        
-        if face_image:
-            print("Face image detected, generating images with face consistency...")
-            for i, page in enumerate(story.get('pages', [])):
-                try:
-                    print(f"\n--- Processing page {i+1}/{len(story['pages'])} ---")
-                    print(f"Prompt: {page.get('image_prompt', 'No prompt')}")
-                    
-                    image_result = await generate_image_with_face(
-                        page.get("image_prompt", ""),
-                        face_image,
-                        child_name
-                    )
-                    
-                    if isinstance(image_result, dict) and 'error' in image_result:
-                        print(f"Error generating image: {image_result['error']}")
-                        if 'response' in image_result:
-                            print(f"Response: {image_result['response']}")
-                        # Set a placeholder image URL instead of None
-                        page['image_url'] = "https://via.placeholder.com/1024x1024?text=Image+Generation+Failed"
-                    else:
-                        page['image_url'] = image_result
-                        print(f"Successfully generated image for page {i+1}")
-                    
-                    # Add a small delay between image generations
-                    await asyncio.sleep(1)
-                    
-                except Exception as e:
-                    print(f"Error processing page {i+1}: {str(e)}")
-                    print(traceback.format_exc())
-                    # Set a placeholder image URL instead of None
-                    page['image_url'] = "https://via.placeholder.com/1024x1024?text=Image+Generation+Error"
-        
-        # Transform the story to match the frontend's expected format
-        response = {
-            "title": story.get("title", f"{child_name}'s Pirate Adventure"),
-            "parts": [
-                {
-                    "text": page.get("story_text", ""),
-                    "image_url": page.get("image_url"),
-                    "image_prompt": page.get("image_prompt", "")
-                }
-                for page in story.get("pages", [])
-            ]
-        }
-        
-        print("\n=== Story generation completed successfully ===")
-        return response
-        
-    except HTTPException:
-        raise  # Re-raise HTTP exceptions as-is
-    except Exception as e:
-        error_msg = f"Unexpected error in generate_story: {str(e)}"
-        print(f"\n!!! {error_msg}")
-        print(traceback.format_exc())
-        # Return a fallback response instead of 500 to keep the frontend working
-        fallback_story = create_fallback_pirate_story(child_name or "Pirate")
-        return {
-            "title": fallback_story["title"],
-            "parts": [
-                {
-                    "text": page["story_text"],
-                    "image_url": None,
-                    "image_prompt": page.get("image_prompt", "")
-                }
-                for page in fallback_story["pages"]
-            ]
-        }
+        # Queue background task for image generation if we have a prompt
+        if image_prompt:
+            background_tasks.add_task(
+                generate_image_for_page,
+                story_id=story_id,
+                page_index=i,
+                prompt=image_prompt,
+                child_name=child_name
+            )
+    
+    print("\n=== Story text generation complete ===")
+    # Store the initial story state
+    story_states[story_id] = {
+        "title": story_data["title"],
+        "parts": [part.dict() for part in parts],
+        "updated_at": time.time()
+    }
+    
+    return {
+        "story_id": story_id,
+        "title": story_data["title"],
+        "parts": [part.dict() for part in parts]
+    }
 
 @app.post("/upload-face")
 async def upload_face(file: UploadFile = File(...)):
@@ -778,6 +688,132 @@ async def generate_pirate_image(request: PirateImageRequest):
             status_code=500,
             detail=error_msg
         )
+
+async def generate_image_for_page(story_id: str, page_index: int, prompt: str, child_name: str):
+    """Background task to generate an image for a story page."""
+    print(f"\n=== Starting image generation for page {page_index + 1} ===")
+    print(f"Prompt: {prompt}")
+    
+    try:
+        # Update status to processing
+        if story_id in story_states:
+            story_states[story_id]["parts"][page_index]["image_status"] = "processing"
+            story_states[story_id]["updated_at"] = time.time()
+            await broadcast_update(story_id)
+        
+        # Try Replicate first
+        result = await generate_image_with_replicate(prompt, child_name)
+        
+        if result and "image" in result:
+            print(f"Successfully generated image for page {page_index + 1}")
+            
+            # Update the story state with the generated image
+            if story_id in story_states:
+                story_states[story_id]["parts"][page_index]["image_url"] = f"data:image/png;base64,{result['image']}"
+                story_states[story_id]["parts"][page_index]["image_status"] = "completed"
+                story_states[story_id]["updated_at"] = time.time()
+                await broadcast_update(story_id)
+            
+            return {
+                "story_id": story_id,
+                "page_index": page_index,
+                "status": "completed",
+                "source": result.get("source", "unknown")
+            }
+        
+        # If we get here, all providers failed
+        error_msg = "All image generation attempts failed"
+        print(error_msg)
+        
+        if story_id in story_states:
+            story_states[story_id]["parts"][page_index]["error"] = error_msg
+            story_states[story_id]["parts"][page_index]["image_status"] = "failed"
+            story_states[story_id]["updated_at"] = time.time()
+            await broadcast_update(story_id)
+            
+        return {
+            "story_id": story_id,
+            "page_index": page_index,
+            "status": "failed",
+            "error": error_msg
+        }
+        
+    except Exception as e:
+        error_msg = f"Error generating image: {str(e)}"
+        print(error_msg)
+        traceback.print_exc()
+        
+        if story_id in story_states:
+            story_states[story_id]["parts"][page_index]["error"] = error_msg
+            story_states[story_id]["parts"][page_index]["image_status"] = "failed"
+            story_states[story_id]["updated_at"] = time.time()
+            await broadcast_update(story_id)
+            
+        return {
+            "story_id": story_id,
+            "page_index": page_index,
+            "status": "failed",
+            "error": error_msg
+        }
+
+async def broadcast_update(story_id: str):
+    """Send updates to all connected WebSocket clients for this story."""
+    if story_id not in active_connections:
+        return
+        
+    story_data = story_states.get(story_id)
+    if not story_data:
+        return
+        
+    for websocket in list(active_connections[story_id]):
+        try:
+            await websocket.send_json({
+                "type": "update",
+                "data": story_data
+            })
+        except Exception as e:
+            print(f"Error broadcasting update: {str(e)}")
+            # Remove disconnected clients
+            active_connections[story_id].remove(websocket)
+            if not active_connections[story_id]:
+                del active_connections[story_id]
+
+@app.websocket("/ws/{story_id}")
+async def websocket_endpoint(websocket: WebSocket, story_id: str):
+    """WebSocket endpoint for real-time updates on story generation."""
+    await websocket.accept()
+    
+    # Add to active connections
+    if story_id not in active_connections:
+        active_connections[story_id] = set()
+    active_connections[story_id].add(websocket)
+    
+    try:
+        # Send current state if available
+        if story_id in story_states:
+            await websocket.send_json({
+                "type": "update",
+                "data": story_states[story_id]
+            })
+            
+        # Keep connection open
+        while True:
+            await asyncio.sleep(60)  # Keep connection alive
+            
+    except WebSocketDisconnect:
+        # Remove connection when client disconnects
+        if story_id in active_connections and websocket in active_connections[story_id]:
+            active_connections[story_id].remove(websocket)
+            if not active_connections[story_id]:
+                del active_connections[story_id]
+
+@app.get("/story/{story_id}")
+async def get_story(story_id: str):
+    """Get the current state of a story."""
+    if story_id not in story_states:
+        raise HTTPException(status_code=404, detail="Story not found")
+        
+    return story_states[story_id]
 
 if __name__ == "__main__":
     import uvicorn
