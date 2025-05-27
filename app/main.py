@@ -41,22 +41,7 @@ load_dotenv()
 # Get allowed origins from environment variable or use default
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
 
-app = FastAPI(
-    title="Pirate Story Generator API",
-    description="API for generating pirate stories with AI",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
-
-@app.get("/", include_in_schema=False)
-async def root():
-    return {"message": "Welcome to Pirate Story Generator API. Visit /docs for the API documentation."}
-
-# Explicitly include the OpenAPI schema endpoint
-@app.get("/openapi.json", include_in_schema=False)
-async def get_openapi():
-    return app.openapi()
+app = FastAPI(title="Pirate Story Generator API")
 
 # CORS middleware configuration
 # In development, allow all origins for easier debugging
@@ -104,7 +89,7 @@ print("="*50 + "\n")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r'https?://(?:.*\.?vercel\.app|localhost|127\.0\.0\.1)(?::\d+)?/?',
+    allow_origin_regex='https?://.*\.?vercel\.app/?',  # Allow any Vercel deployment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -524,8 +509,7 @@ async def generate_story(
 ):
     """Generate an 8-page pirate story with Flapjack-style images.
     
-    This endpoint starts the story generation process and returns immediately with the story text.
-    Images are generated asynchronously in the background.
+    This endpoint generates the story and waits for all images to be ready before returning.
     """
     print("\n=== Starting story generation ===")
     print(f"Child name: {child_name}")
@@ -546,6 +530,7 @@ async def generate_story(
     # Create story parts with initial state
     parts = []
     story_id = str(uuid.uuid4())
+    image_generation_tasks = []
     
     for i, page in enumerate(story_data["pages"][:8]):  # Limit to 8 pages
         image_prompt = page.get("image_prompt", "") if isinstance(page, dict) else ""
@@ -556,29 +541,57 @@ async def generate_story(
             image_status="pending"
         )
         parts.append(part)
-        
-        # Queue background task for image generation if we have a prompt
-        if image_prompt:
-            background_tasks.add_task(
-                generate_image_for_page,
-                story_id=story_id,
-                page_index=i,
-                prompt=image_prompt,
-                child_name=child_name
-            )
     
-    print("\n=== Story text generation complete ===")
     # Store the initial story state
     story_states[story_id] = {
         "title": story_data["title"],
         "parts": [part.dict() for part in parts],
-        "updated_at": time.time()
+        "updated_at": time.time(),
+        "completed": False,
+        "total_pages": len(parts),
+        "completed_pages": 0
     }
+    
+    # Generate images for all pages with prompts
+    for i, part in enumerate(parts):
+        if part.image_prompt:
+            # Create a task for each image generation
+            task = asyncio.create_task(
+                generate_image_for_page(
+                    story_id=story_id,
+                    page_index=i,
+                    prompt=part.image_prompt,
+                    child_name=child_name
+                )
+            )
+            image_generation_tasks.append(task)
+    
+    # Wait for all images to be generated with a timeout
+    if image_generation_tasks:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*image_generation_tasks, return_exceptions=True),
+                timeout=300  # 5 minutes timeout for all images
+            )
+        except asyncio.TimeoutError:
+            print("Warning: Image generation timed out for some pages")
+    
+    # Mark story as completed
+    if story_id in story_states:
+        story_states[story_id]["completed"] = True
+        await broadcast_update(story_id)
+    
+    # Get the final state
+    final_state = story_states.get(story_id, {
+        "title": story_data["title"],
+        "parts": [part.dict() for part in parts]
+    })
     
     return {
         "story_id": story_id,
-        "title": story_data["title"],
-        "parts": [part.dict() for part in parts]
+        "title": final_state["title"],
+        "parts": final_state["parts"],
+        "completed": True
     }
 
 @app.post("/upload-face")
@@ -705,7 +718,7 @@ async def generate_pirate_image(request: PirateImageRequest):
         )
 
 async def generate_image_for_page(story_id: str, page_index: int, prompt: str, child_name: str):
-    """Background task to generate an image for a story page."""
+    """Generate an image for a story page and update the story state."""
     print(f"\n=== Starting image generation for page {page_index + 1} ===")
     print(f"Prompt: {prompt}")
     
@@ -726,6 +739,7 @@ async def generate_image_for_page(story_id: str, page_index: int, prompt: str, c
             if story_id in story_states:
                 story_states[story_id]["parts"][page_index]["image_url"] = f"data:image/png;base64,{result['image']}"
                 story_states[story_id]["parts"][page_index]["image_status"] = "completed"
+                story_states[story_id]["completed_pages"] = story_states[story_id].get("completed_pages", 0) + 1
                 story_states[story_id]["updated_at"] = time.time()
                 await broadcast_update(story_id)
             
@@ -743,6 +757,7 @@ async def generate_image_for_page(story_id: str, page_index: int, prompt: str, c
         if story_id in story_states:
             story_states[story_id]["parts"][page_index]["error"] = error_msg
             story_states[story_id]["parts"][page_index]["image_status"] = "failed"
+            story_states[story_id]["completed_pages"] = story_states[story_id].get("completed_pages", 0) + 1
             story_states[story_id]["updated_at"] = time.time()
             await broadcast_update(story_id)
             
@@ -761,6 +776,7 @@ async def generate_image_for_page(story_id: str, page_index: int, prompt: str, c
         if story_id in story_states:
             story_states[story_id]["parts"][page_index]["error"] = error_msg
             story_states[story_id]["parts"][page_index]["image_status"] = "failed"
+            story_states[story_id]["completed_pages"] = story_states[story_id].get("completed_pages", 0) + 1
             story_states[story_id]["updated_at"] = time.time()
             await broadcast_update(story_id)
             
