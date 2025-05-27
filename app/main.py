@@ -41,7 +41,22 @@ load_dotenv()
 # Get allowed origins from environment variable or use default
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
 
-app = FastAPI(title="Pirate Story Generator API")
+app = FastAPI(
+    title="Pirate Story Generator API",
+    description="API for generating pirate stories with AI",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return {"message": "Welcome to Pirate Story Generator API. Visit /docs for the API documentation."}
+
+# Explicitly include the OpenAPI schema endpoint
+@app.get("/openapi.json", include_in_schema=False)
+async def get_openapi():
+    return app.openapi()
 
 # CORS middleware configuration
 # In development, allow all origins for easier debugging
@@ -89,7 +104,7 @@ print("="*50 + "\n")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex='https?://.*\.?vercel\.app/?',  # Allow any Vercel deployment
+    allow_origin_regex=r'https?://(?:.*\.?vercel\.app|localhost|127\.0\.0\.1)(?::\d+)?/?',
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
