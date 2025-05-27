@@ -848,8 +848,17 @@ async def get_story(story_id: str):
 
 if __name__ == "__main__":
     import uvicorn
+    import os
+    
+    # Get port from environment variable or default to 8000 for local development
+    port = int(os.environ.get('PORT', 8000))
+    
     print("🏴‍☠️ Starting Pirate Story Generator API...")
     print(f"Groq API configured: {bool(GROQ_API_KEY)}")
     print(f"Stability AI configured: {bool(STABILITY_API_KEY)}")
+    print(f"Server starting on port {port}")
     print("Ready to generate pirate adventures!")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    # Note: For production, Render will use the start.sh script which runs:
+    # uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    uvicorn.run(app, host="0.0.0.0", port=port)
