@@ -18,6 +18,7 @@ import replicate
 import time
 import httpx
 import json
+import tempfile
 
 # In-memory storage for story state (in a real app, use a database)
 story_states = {}
@@ -78,7 +79,12 @@ if FRONTEND_URL:
 # Remove duplicates
 allowed_origins = list(set(allowed_origins))
 
-# Logging is handled by the production logging system
+# Log allowed origins for debugging
+print("\n" + "="*50)
+print(f"Environment: {'PRODUCTION' if is_production else 'DEVELOPMENT'}")
+print(f"Frontend URL: {FRONTEND_URL}")
+print(f"Allowed Origins: {json.dumps(allowed_origins, indent=2)}")
+print("="*50 + "\n")
 
 # Add CORS middleware
 app.add_middleware(
@@ -113,11 +119,7 @@ class StoryRequest(BaseModel):
     theme: str = ""
     face_image: Optional[str] = None  # Base64 encoded face image
 
-class PirateImageRequest(BaseModel):
-    """Request model for pirate image generation"""
-    image_base64: str
-    prompt: str = "Turn this into a pirate-themed image"
-    child_name: str = "pirate"
+
 
 class StoryResponse(BaseModel):
     title: str
@@ -241,7 +243,7 @@ def fix_base64_padding(b64_string: str) -> str:
     
     return b64_string
 
-async def generate_image_with_replicate(prompt: str, child_name: str) -> Optional[Dict[str, Any]]:
+async def generate_image_with_replicate(prompt: str, child_name: str, face_image_b64: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Generate an image using Replicate API asynchronously."""
     if not REPLICATE_API_KEY:
         return None
@@ -252,20 +254,56 @@ async def generate_image_with_replicate(prompt: str, child_name: str) -> Optiona
         print(f"\n=== Generating image with Replicate ===")
         print(f"Prompt: {enhanced_prompt}")
         
+        # Prepare the input parameters
+        input_params = {
+            "prompt": enhanced_prompt,
+            "width": 1024,
+            "height": 1024,
+            "num_outputs": 1,
+            "guidance_scale": 7.5,
+            "num_inference_steps": 35,
+        }
+        
+        # If we have a face image, prepare for image-to-image
+        if face_image_b64:
+            print("Using face image for image-to-image generation")
+            try:
+                # Remove data URL prefix if present
+                if "," in face_image_b64:
+                    face_image_b64 = face_image_b64.split(",", 1)[1]
+                
+                # Decode the base64 image
+                image_data = base64.b64decode(face_image_b64)
+                
+                # Save to a temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
+                    temp_file.write(image_data)
+                    temp_file_path = temp_file.name
+                
+                # Add image to input parameters
+                input_params["image"] = open(temp_file_path, "rb")
+                input_params["prompt_strength"] = 0.6
+                
+                # Use a different model for image-to-image
+                model = "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b"
+            except Exception as e:
+                print(f"Error processing face image: {str(e)}")
+                # Fall back to text-to-image if there's an error with the face image
+                model = "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b"
+        else:
+            model = "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b"
+            print("No face image provided, using text-to-image")
+        
         # Use SDXL for image generation
         output = await asyncio.to_thread(
             replicate.run,
-            "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-            input={
-                "prompt": enhanced_prompt,
-                "width": 1024,
-                "height": 1024,
-                "num_outputs": 1,
-                "num_inference_steps": 30,
-                "guidance_scale": 7.5,
-                "negative_prompt": "low quality, blurry, distorted, bad anatomy, bad proportions, extra limbs, cropped, cut off, text, watermark, signature, jpeg artifacts",
-            }
+            model,
+            input=input_params
         )
+        
+        # Clean up the temporary file if it exists
+        if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
         
         if isinstance(output, list) and len(output) > 0:
             # Download the image asynchronously
@@ -286,7 +324,7 @@ async def generate_image_with_replicate(prompt: str, child_name: str) -> Optiona
         print(f"{error_msg}\n{traceback.format_exc()}")
         return {"error": error_msg}
 
-async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], child_name: str) -> Dict[str, Any]:
+async def generate_image(prompt: str, child_name: str) -> Dict[str, Any]:
     """
     Generate image using available services with detailed error reporting.
     Returns a dictionary with either 'image' (base64) or 'error' key.
@@ -294,44 +332,13 @@ async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], c
     print("\n=== Starting image generation ===")
     print(f"Prompt: {prompt}")
     
-    # Check if we have face image but can't process it
-    if face_image_b64 and (not CV2_AVAILABLE or not MEDIAPIPE_AVAILABLE):
-        print("Warning: Face processing requires OpenCV and MediaPipe. Face consistency will be limited.")
-        if not CV2_AVAILABLE:
-            print("- OpenCV is not installed. Install with: pip install opencv-python-headless")
-        if not MEDIAPIPE_AVAILABLE:
-            print("- MediaPipe is not installed. Install with: pip install mediapipe")
-    
     # Track which services were attempted and why they failed
     attempts = []
     
-    # First try Stability AI if key is available
-    if STABILITY_API_KEY:
-        print("\n--- Trying Stability AI ---")
-        try:
-            result = await _try_stability_ai(prompt, face_image_b64, child_name)
-            if result and not isinstance(result, dict) or 'error' not in result:
-                print("✓ Successfully generated with Stability AI")
-                return {"image": result}
-                
-            error_msg = f"Stability AI failed: {result.get('error') if result else 'No result'}"
-            print(f"✗ {error_msg}")
-            attempts.append({"service": "Stability AI", "error": str(error_msg)})
-            
-            # If we have a detailed response, log it
-            if result and 'response' in result:
-                print(f"Stability AI response: {result['response']}")
-        except Exception as e:
-            error_msg = f"Error with Stability AI: {str(e)}"
-            print(f"✗ {error_msg}")
-            attempts.append({"service": "Stability AI", "error": str(e)})
-    else:
-        attempts.append({"service": "Stability AI", "error": "API key not configured"})
-    
-    # Fall back to Replicate if Stability AI fails or isn't configured
+    # First try Replicate if key is available
     if REPLICATE_API_KEY:
         print("\n--- Trying Replicate ---")
-        result = await generate_image_with_replicate(prompt, face_image_b64, child_name)
+        result = await generate_image_with_replicate(prompt, child_name)
         if not isinstance(result, dict) or 'error' not in result:
             print("✓ Successfully generated with Replicate")
             return result
@@ -342,11 +349,30 @@ async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], c
     else:
         attempts.append({"service": "Replicate", "error": "API key not configured"})
     
+    # Fall back to Stability AI if Replicate fails or isn't configured
+    if STABILITY_API_KEY:
+        print("\n--- Trying Stability AI ---")
+        try:
+            result = await _try_stability_ai(prompt, child_name)
+            if result and not isinstance(result, dict) or 'error' not in result:
+                print("✓ Successfully generated with Stability AI")
+                return {"image": result}
+                
+            error_msg = f"Stability AI failed: {result.get('error') if result else 'No result'}"
+            print(f"✗ {error_msg}")
+            attempts.append({"service": "Stability AI", "error": str(error_msg)})
+            
+            if result and 'response' in result:
+                print(f"Stability AI response: {result['response']}")
+        except Exception as e:
+            error_msg = f"Error with Stability AI: {str(e)}"
+            print(f"✗ {error_msg}")
+            attempts.append({"service": "Stability AI", "error": str(e)})
+    else:
+        attempts.append({"service": "Stability AI", "error": "API key not configured"})
+    
     # Generate detailed error message
-    error_details = "\n".join([
-        f"- {attempt['service']}: {attempt['error']}" 
-        for attempt in attempts
-    ])
+    error_details = "\n".join([f"- {attempt['service']}: {attempt['error']}" for attempt in attempts])
     
     if not attempts:
         final_error = "No image generation services were attempted. Check your API keys."
@@ -357,50 +383,76 @@ async def generate_image_with_face(prompt: str, face_image_b64: Optional[str], c
     return {"error": final_error, "attempts": attempts}
 
 async def _try_stability_ai(prompt: str, face_image_b64: Optional[str], child_name: str) -> Union[str, Dict[str, str]]:
-    """Try to generate an image using Stability AI."""
-    if not face_image_b64:
-        return {"error": "No face image provided"}
-    
+    """Try to generate an image using Stability AI with optional face image."""
     try:
         # Create the enhanced prompt with Flapjack style
         enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
         print(f"Enhanced prompt: {enhanced_prompt[:100]}...")  # Print first 100 chars
         
-        # Fix base64 padding and remove data URL prefix
-        try:
-            face_image_b64 = fix_base64_padding(face_image_b64)
-            # Decode and validate the image
-            image_data = base64.b64decode(face_image_b64, validate=True)
-            print(f"Successfully decoded image data: {len(image_data)} bytes")
-        except Exception as e:
-            error_msg = f"Error processing image data: {str(e)}"
-            print(error_msg)
-            return {"error": error_msg}
-        
-        # Prepare the request data
-        files = {"init_image": ("face.jpg", image_data, "image/jpeg")}
-        data = {
-            "image_strength": 0.4,
-            "init_image_mode": "IMAGE_STRENGTH",
-            "text_prompts[0][text]": enhanced_prompt,
-            "text_prompts[0][weight]": 1.0,
-            "cfg_scale": 8,
-            "samples": 1,
-            "steps": 35,
-            "style_preset": "cartoon"
-        }
-        
-        print("Sending request to Stability AI...")
-        response = requests.post(
-            "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {STABILITY_API_KEY}"
-            },
-            files=files,
-            data=data,
-            timeout=60  # 60 seconds timeout
-        )
+        # If we have a face image, use image-to-image, otherwise use text-to-image
+        if face_image_b64:
+            print("Using image-to-image with face")
+            # Prepare the request data for image-to-image
+            try:
+                # Fix base64 padding and remove data URL prefix
+                face_image_b64 = fix_base64_padding(face_image_b64)
+                # Decode and validate the image
+                image_data = base64.b64decode(face_image_b64, validate=True)
+                print(f"Successfully decoded image data: {len(image_data)} bytes")
+                
+                files = {"init_image": ("face.jpg", image_data, "image/jpeg")}
+                data = {
+                    "image_strength": 0.4,
+                    "init_image_mode": "IMAGE_STRENGTH",
+                    "text_prompts[0][text]": enhanced_prompt,
+                    "text_prompts[0][weight]": 1.0,
+                    "cfg_scale": 8,
+                    "samples": 1,
+                    "steps": 35,
+                    "style_preset": "cartoon"
+                }
+                
+                response = requests.post(
+                    "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image",
+                    headers={
+                        "Accept": "application/json",
+                        "Authorization": f"Bearer {STABILITY_API_KEY}"
+                    },
+                    files=files,
+                    data=data,
+                    timeout=60
+                )
+            except Exception as e:
+                error_msg = f"Error processing face image: {str(e)}"
+                print(error_msg)
+                return {"error": error_msg}
+        else:
+            print("Using text-to-image (no face provided)")
+            # Prepare the request data for text-to-image
+            data = {
+                "text_prompts[0][text]": enhanced_prompt,
+                "text_prompts[0][weight]": 1.0,
+                "cfg_scale": 8,
+                "samples": 1,
+                "steps": 35,
+                "style_preset": "cartoon"
+            }
+            
+            response = requests.post(
+                "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {STABILITY_API_KEY}"
+                },
+                json={
+                    "text_prompts": [{"text": enhanced_prompt, "weight": 1.0}],
+                    "cfg_scale": 8,
+                    "steps": 35,
+                    "style_preset": "cartoon"
+                },
+                timeout=60  # 60 seconds timeout
+            )
         
         print(f"Status code: {response.status_code}")
         
@@ -495,6 +547,20 @@ def create_fallback_pirate_story(child_name: str):
         ]
     }
 
+@app.post("/upload-face")
+async def upload_face(file: UploadFile = File(...)):
+    """Upload a face image and return its base64 encoded content."""
+    try:
+        # Read the file content
+        contents = await file.read()
+        
+        # Encode to base64
+        base64_encoded = base64.b64encode(contents).decode('utf-8')
+        
+        return {"face_image": base64_encoded}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
 @app.post("/generate-story")
 async def generate_story(
     background_tasks: BackgroundTasks,
@@ -556,7 +622,8 @@ async def generate_story(
                     story_id=story_id,
                     page_index=i,
                     prompt=part.image_prompt,
-                    child_name=child_name
+                    child_name=child_name,
+                    face_image=face_image
                 )
             )
             image_generation_tasks.append(task)
@@ -589,36 +656,7 @@ async def generate_story(
         "completed": True
     }
 
-@app.post("/upload-face")
-async def upload_face(file: UploadFile = File(...)):
-    """Upload and convert face image to base64."""
-    try:
-        contents = await file.read()
-        image = Image.open(BytesIO(contents))
-        
-        # Convert RGBA to RGB if needed
-        if image.mode in ('RGBA', 'LA'):
-            background = Image.new('RGB', image.size, (255, 255, 255))
-            background.paste(image, mask=image.split()[-1])
-            image = background
-        elif image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        # Resize if too large
-        if image.width > 512 or image.height > 512:
-            image.thumbnail((512, 512), Image.Resampling.LANCZOS)
-        
-        # Convert to base64
-        buffered = BytesIO()
-        image.save(buffered, format="JPEG", quality=90)
-        face_b64 = base64.b64encode(buffered.getvalue()).decode()
-        
-        return {"face_image": f"data:image/jpeg;base64,{face_b64}"}
-        
-    except Exception as e:
-        print(f"Error in upload_face: {str(e)}")
-        print(traceback.format_exc())
-        raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
+
 
 @app.get("/health")
 async def health_check():
@@ -635,84 +673,9 @@ async def test_story(name: str, theme: str):
     request = StoryRequest(child_name=name, theme=theme)
     return await generate_story(story_request=request)
 
-@app.post("/api/generate-pirate-image", response_model=Dict[str, str])
-async def generate_pirate_image(request: PirateImageRequest):
-    """
-    Generate a pirate-themed version of the input image.
-    
-    Parameters:
-    - image_base64: Base64 encoded image data
-    - prompt: Description of how to transform the image (default: pirate theme)
-    - child_name: Name to use for character consistency (default: "pirate")
-    
-    Returns:
-    - Dictionary with the generated image in base64 format
-    """
-    print(f"Starting image generation with prompt: {request.prompt}")
-    
-    # Validate base64 data
-    if not request.image_base64 or not request.image_base64.strip():
-        raise HTTPException(status_code=400, detail="No image data provided")
-        
-    try:
-        # Try to decode the base64 to verify it's valid
-        try:
-            # Remove data URL prefix if present
-            if "," in request.image_base64:
-                request.image_base64 = request.image_base64.split(",", 1)[1]
-            base64.b64decode(request.image_base64, validate=True)
-        except Exception as e:
-            print(f"Invalid base64 data: {str(e)}")
-            raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
-            
-        print("Base64 data validated, starting image generation...")
-        
-        # Generate the image using the existing function
-        result = await generate_image_with_face(
-            prompt=request.prompt,
-            face_image_b64=request.image_base64,
-            child_name=request.child_name
-        )
-        
-        print(f"Image generation result: {'Success' if result and 'image' in result else 'Failed'}")
-        
-        if not result:
-            raise HTTPException(
-                status_code=500,
-                detail="No result from image generation service"
-            )
-            
-        if "error" in result:
-            error_detail = result.get("error", "Unknown error during image generation")
-            print(f"Error in image generation: {error_detail}")
-            raise HTTPException(
-                status_code=500,
-                detail=error_detail
-            )
-            
-        if not result.get("image"):
-            raise HTTPException(
-                status_code=500,
-                detail="Image generation succeeded but no image data was returned"
-            )
-            
-        print("Image generated successfully")
-        return {"image_base64": result.get("image")}
-        
-    except HTTPException:
-        # Re-raise HTTP exceptions as they are
-        raise
-        
-    except Exception as e:
-        error_msg = f"Error in generate_pirate_image: {str(e)}"
-        print(error_msg)
-        print(traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail=error_msg
-        )
 
-async def generate_image_for_page(story_id: str, page_index: int, prompt: str, child_name: str):
+
+async def generate_image_for_page(story_id: str, page_index: int, prompt: str, child_name: str, face_image: Optional[str] = None):
     """Generate an image for a story page and update the story state."""
     print(f"\n=== Starting image generation for page {page_index + 1} ===")
     print(f"Prompt: {prompt}")
@@ -724,8 +687,8 @@ async def generate_image_for_page(story_id: str, page_index: int, prompt: str, c
             story_states[story_id]["updated_at"] = time.time()
             await broadcast_update(story_id)
         
-        # Try Replicate first
-        result = await generate_image_with_replicate(prompt, child_name)
+        # Try Replicate with the face image if available
+        result = await generate_image_with_replicate(prompt, child_name, face_image)
         
         if result and "image" in result:
             print(f"Successfully generated image for page {page_index + 1}")
