@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Stability AI Configuration
-STABILITY_API_KEY = os.getenv('sk-1og2JcHwC6IPD40nje8Yeb8xCMB8zD9UesGN651G274DQRpO')
+STABILITY_API_KEY = os.getenv('STABILITY_API_KEY')
 STABILITY_API_HOST = 'https://api.stability.ai'
 STABILITY_ENGINE_ID = 'stable-diffusion-xl-1024-v1-0'  # or 'stable-diffusion-v1-6' for older models
 
@@ -691,13 +691,13 @@ async def generate_pirate_image(request: PirateImageRequest):
         print(f"Face image provided: {'Yes' if request.face_image else 'No'}")
         
         # Check if we have the required API keys
-        if not STABILITY_API_KEY and not os.getenv('r8_07wiri4F62FGoadie55tX1lcBzSHQFP2eQkkw'):
+        if not STABILITY_API_KEY and not os.getenv('REPLICATE_API_TOKEN'):
             error_msg = "No API keys found. Please set both STABILITY_API_KEY and REPLICATE_API_TOKEN environment variables."
             print(error_msg)
             raise HTTPException(status_code=500, detail=error_msg)
             
         # Try with Replicate first if API key is available
-        if os.getenv('r8_07wiri4F62FGoadie55tX1lcBzSHQFP2eQkkw'):
+        if os.getenv('REPLICATE_API_TOKEN'):
             print("\n--- Trying Replicate API ---")
             try:
                 result = await generate_image_with_replicate(

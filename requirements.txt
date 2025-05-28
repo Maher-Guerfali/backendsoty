@@ -14,3 +14,5 @@ numpy>=1.24.0
 # AI Services
 replicate>=1.0.0
 requests==2.32.3
+stability-sdk>=0.5.1
+protobuf>=3.20.0,<4.0.0  # Required by stability_sdk
