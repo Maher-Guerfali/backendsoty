@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Stability AI Configuration
-STABILITY_API_KEY = os.getenv('STABILITY_API_KEY')
+STABILITY_API_KEY = os.getenv('sk-1og2JcHwC6IPD40nje8Yeb8xCMB8zD9UesGN651G274DQRpO')
 STABILITY_API_HOST = 'https://api.stability.ai'
 STABILITY_ENGINE_ID = 'stable-diffusion-xl-1024-v1-0'  # or 'stable-diffusion-v1-6' for older models
 
@@ -685,33 +685,73 @@ class PirateImageRequest(BaseModel):
 async def generate_pirate_image(request: PirateImageRequest):
     """Test endpoint to generate a pirate image with a face."""
     try:
-        print("Generating pirate image with face...")
+        print("\n=== Starting pirate image generation ===")
+        print(f"Request received with prompt: {request.prompt[:100]}...")
+        print(f"Child name: {request.child_name}")
+        print(f"Face image provided: {'Yes' if request.face_image else 'No'}")
         
-        # Try with Replicate first
-        result = await generate_image_with_replicate(
-            prompt=request.prompt,
-            child_name=request.child_name,
-            face_image_b64=request.face_image
-        )
+        # Check if we have the required API keys
+        if not STABILITY_API_KEY and not os.getenv('r8_07wiri4F62FGoadie55tX1lcBzSHQFP2eQkkw'):
+            error_msg = "No API keys found. Please set both STABILITY_API_KEY and REPLICATE_API_TOKEN environment variables."
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
+            
+        # Try with Replicate first if API key is available
+        if os.getenv('r8_07wiri4F62FGoadie55tX1lcBzSHQFP2eQkkw'):
+            print("\n--- Trying Replicate API ---")
+            try:
+                result = await generate_image_with_replicate(
+                    prompt=request.prompt,
+                    child_name=request.child_name,
+                    face_image_b64=request.face_image
+                )
+                
+                if result and "image" in result:
+                    print("✓ Successfully generated image with Replicate")
+                    return {"image": result["image"], "source": "replicate"}
+                else:
+                    error_msg = result.get("error", "Unknown error from Replicate")
+                    print(f"Replicate API error: {error_msg}")
+                    
+            except Exception as e:
+                print(f"Replicate API call failed: {str(e)}")
+                traceback.print_exc()
+        else:
+            print("Skipping Replicate (no API key found)")
         
-        if result and "image" in result:
-            return {"image": result["image"], "source": "replicate"}
+        # Fall back to Stability AI if available
+        if STABILITY_API_KEY:
+            print("\n--- Trying Stability AI API ---")
+            try:
+                result = await _try_stability_ai(
+                    prompt=request.prompt,
+                    face_image_b64=request.face_image,
+                    child_name=request.child_name
+                )
+                
+                if isinstance(result, dict) and "image" in result:
+                    print("✓ Successfully generated image with Stability AI")
+                    return {"image": result["image"], "source": "stability-ai"}
+                else:
+                    error_msg = result.get("error", "Unknown error from Stability AI") if isinstance(result, dict) else "Invalid response from Stability AI"
+                    print(f"Stability AI API error: {error_msg}")
+                    
+            except Exception as e:
+                print(f"Stability AI API call failed: {str(e)}")
+                traceback.print_exc()
+        else:
+            print("Skipping Stability AI (no API key found)")
         
-        # Fall back to Stability AI if Replicate fails
-        print("Replicate failed, trying Stability AI...")
-        result = await _try_stability_ai(
-            prompt=request.prompt,
-            face_image_b64=request.face_image,
-            child_name=request.child_name
-        )
+        # If we get here, all attempts failed
+        error_msg = "Failed to generate image with all available services. Check the logs for more details."
+        print(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
         
-        if isinstance(result, dict) and "image" in result:
-            return {"image": result["image"], "source": "stability-ai"}
-        
-        raise HTTPException(status_code=500, detail="Failed to generate image with both Replicate and Stability AI")
-        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        error_msg = f"Error generating pirate image: {str(e)}"
+        error_msg = f"Unexpected error: {str(e)}"
         print(error_msg)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=error_msg)
