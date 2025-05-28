@@ -561,6 +561,46 @@ async def upload_face(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
+class PirateImageRequest(BaseModel):
+    face_image: str  # Base64 encoded image
+    prompt: str
+    child_name: str
+
+@app.post("/api/generate-pirate-image", response_model=Dict[str, str])
+async def generate_pirate_image(request: PirateImageRequest):
+    """Test endpoint to generate a pirate image with a face."""
+    try:
+        print("Generating pirate image with face...")
+        
+        # Try with Replicate first
+        result = await generate_image_with_replicate(
+            prompt=request.prompt,
+            child_name=request.child_name,
+            face_image_b64=request.face_image
+        )
+        
+        if result and "image" in result:
+            return {"image": result["image"], "source": "replicate"}
+        
+        # Fall back to Stability AI if Replicate fails
+        print("Replicate failed, trying Stability AI...")
+        result = await _try_stability_ai(
+            prompt=request.prompt,
+            face_image_b64=request.face_image,
+            child_name=request.child_name
+        )
+        
+        if isinstance(result, dict) and "image" in result:
+            return {"image": result["image"], "source": "stability-ai"}
+        
+        raise HTTPException(status_code=500, detail="Failed to generate image with both Replicate and Stability AI")
+        
+    except Exception as e:
+        error_msg = f"Error generating pirate image: {str(e)}"
+        print(error_msg)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=error_msg)
+
 @app.post("/generate-story")
 async def generate_story(
     background_tasks: BackgroundTasks,
