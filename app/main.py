@@ -30,11 +30,6 @@ active_connections = {}
 import warnings
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-# Uncomment these if you want to use Hugging Face in the future
-# from diffusers import StableDiffusionInpaintPipeline, StableDiffusionImg2ImgPipeline
-# import torch
-# from transformers import pipeline as hf_pipeline
-
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
