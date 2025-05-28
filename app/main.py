@@ -36,6 +36,11 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 from dotenv import load_dotenv
 load_dotenv()
 
+# Stability AI Configuration
+STABILITY_API_KEY = os.getenv('STABILITY_API_KEY')
+STABILITY_API_HOST = 'https://api.stability.ai'
+STABILITY_ENGINE_ID = 'stable-diffusion-xl-1024-v1-0'  # or 'stable-diffusion-v1-6' for older models
+
 # Get allowed origins from environment variable or use default
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
 
@@ -46,32 +51,38 @@ app = FastAPI(title="Pirate Story Generator API")
 # In production, you should restrict this to your frontend domain
 is_production = os.getenv('ENVIRONMENT', 'development') == 'production'
 
-# Default allowed origins (for production)
-allowed_origins = [
-    "https://mystoria-alpha.vercel.app",
-    "https://mystoria-alpha.vercel.app/",
-]
+# Base allowed origins
+allowed_origins = []
 
-# Development origins (added if not in production)
+# Add frontend URL if specified
+if FRONTEND_URL:
+    # Add both with and without trailing slash
+    allowed_origins.extend([
+        FRONTEND_URL.rstrip('/'),
+        f"{FRONTEND_URL.rstrip('/')}/"
+    ])
+
+# Development origins (only add if not in production)
 if not is_production:
     development_origins = [
-        "http://localhost:*",
-        "http://127.0.0.1:*",
+        "http://localhost:3000",
+        "http://localhost:8000",
         "http://localhost:5173",
         "http://localhost:5174",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
+        "https://localhost:3000",
+        "https://localhost:8000",
         "https://localhost:5173",
         "https://localhost:5174",
+        "https://127.0.0.1:3000",
+        "https://127.0.0.1:8000",
         "https://127.0.0.1:5173",
         "https://127.0.0.1:5174",
     ]
     allowed_origins.extend(development_origins)
-
-# Add any additional origins from environment variable
-if FRONTEND_URL:
-    # Add both with and without trailing slash
-    allowed_origins.extend([FRONTEND_URL.rstrip('/'), f"{FRONTEND_URL.rstrip('/')}/"])
 
 # Remove duplicates
 allowed_origins = list(set(allowed_origins))
@@ -83,16 +94,26 @@ print(f"Frontend URL: {FRONTEND_URL}")
 print(f"Allowed Origins: {json.dumps(allowed_origins, indent=2)}")
 print("="*50 + "\n")
 
-# Add CORS middleware
+# Add CORS middleware with WebSocket support
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex='https?://.*\.?vercel\.app/?',  # Allow any Vercel deployment
+    allow_origin_regex=r'https?://.*\.?vercel\.app/?',  # Allow any Vercel deployment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# Add WebSocket origin checking middleware
+@app.middleware("http")
+async def check_origin(request: Request, call_next):
+    # Skip origin check for WebSocket upgrade requests
+    if "upgrade" in request.headers.get("connection", "").lower():
+        return await call_next(request)
+        
+    # For regular HTTP requests, use CORS middleware
+    return await call_next(request)
 
 # API settings
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -368,170 +389,220 @@ async def generate_image_with_replicate(
             except Exception as e:
                 print(f"Error cleaning up temporary file: {str(e)}")
 
-async def generate_image(prompt: str, child_name: str) -> Dict[str, Any]:
+async def generate_image(
+    prompt: str, 
+    child_name: str, 
+    face_image_b64: Optional[str] = None,
+    width: int = 1024,
+    height: int = 1024,
+    strength: float = 0.7
+) -> Dict[str, str]:
     """
     Generate image using available services with detailed error reporting.
-    Returns a dictionary with either 'image' (base64) or 'error' key.
-    """
-    print("\n=== Starting image generation ===")
-    print(f"Prompt: {prompt}")
     
-    # Track which services were attempted and why they failed
-    attempts = []
-    
-    # First try Replicate if key is available
-    if REPLICATE_API_KEY:
-        print("\n--- Trying Replicate ---")
-        result = await generate_image_with_replicate(prompt, child_name)
-        if not isinstance(result, dict) or 'error' not in result:
-            print("✓ Successfully generated with Replicate")
-            return result
-            
-        error_msg = f"Replicate failed: {result.get('error')}"
-        print(f"✗ {error_msg}")
-        attempts.append({"service": "Replicate", "error": result.get('error')})
-    else:
-        attempts.append({"service": "Replicate", "error": "API key not configured"})
-    
-    # Fall back to Stability AI if Replicate fails or isn't configured
-    if STABILITY_API_KEY:
-        print("\n--- Trying Stability AI ---")
-        try:
-            result = await _try_stability_ai(prompt, child_name)
-            if result and not isinstance(result, dict) or 'error' not in result:
-                print("✓ Successfully generated with Stability AI")
-                return {"image": result}
-                
-            error_msg = f"Stability AI failed: {result.get('error') if result else 'No result'}"
-            print(f"✗ {error_msg}")
-            attempts.append({"service": "Stability AI", "error": str(error_msg)})
-            
-            if result and 'response' in result:
-                print(f"Stability AI response: {result['response']}")
-        except Exception as e:
-            error_msg = f"Error with Stability AI: {str(e)}"
-            print(f"✗ {error_msg}")
-            attempts.append({"service": "Stability AI", "error": str(e)})
-    else:
-        attempts.append({"service": "Stability AI", "error": "API key not configured"})
-    
-    # Generate detailed error message
-    error_details = "\n".join([f"- {attempt['service']}: {attempt['error']}" for attempt in attempts])
-    
-    if not attempts:
-        final_error = "No image generation services were attempted. Check your API keys."
-    else:
-        final_error = f"All image generation attempts failed. Here's what happened:\n{error_details}"
-    
-    print(f"\n=== Image Generation Failed ===\n{final_error}")
-    return {"error": final_error, "attempts": attempts}
-
-async def _try_stability_ai(prompt: str, face_image_b64: Optional[str], child_name: str) -> Union[str, Dict[str, str]]:
-    """Try to generate an image using Stability AI with optional face image."""
-    try:
-        # Create the enhanced prompt with Flapjack style
-        enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
-        print(f"Enhanced prompt: {enhanced_prompt[:100]}...")  # Print first 100 chars
+    Args:
+        prompt: Text prompt for image generation
+        child_name: Name of the child (for prompt enhancement)
+        face_image_b64: Optional base64-encoded image for image-to-image
+        width: Width of the output image (default: 1024)
+        height: Height of the output image (default: 1024)
+        strength: How much to transform the input image (0.0 to 1.0, default: 0.7)
         
-        # If we have a face image, use image-to-image, otherwise use text-to-image
+    Returns:
+        Dictionary with 'image' (base64) or 'error' key
+    """
+    print(f"\n=== Starting image generation ===")
+    print(f"Prompt: {prompt}")
+    if face_image_b64:
+        print("Using image-to-image with provided face")
+    
+    # Try different services in order of preference
+    services = []
+    
+    # Add Stability AI if API key is available
+    if STABILITY_API_KEY:
+        services.append(("stability-ai-sd3", _try_stability_ai, {
+            "prompt": prompt, 
+            "child_name": child_name,
+            "face_image_b64": face_image_b64,
+            "width": width,
+            "height": height,
+            "strength": strength
+        }))
+    
+    # Add Replicate if API key is available
+    if REPLICATE_API_KEY:
+        services.append(("replicate", generate_image_with_replicate, {
+            "prompt": prompt,
+            "child_name": child_name,
+            "face_image_b64": face_image_b64,
+            "width": width,
+            "height": height,
+            "strength": strength
+        }))
+    
+    if not services:
+        error_msg = "No image generation services are properly configured. Please check your API keys."
+        print(error_msg)
+        return {"error": error_msg, "attempts": []}
+    
+    errors = []
+    
+    for service_name, service_func, kwargs in services:
+        print(f"\nTrying {service_name}...")
+        try:
+            result = await service_func(**kwargs)
+            
+            if isinstance(result, dict):
+                if "image" in result:
+                    print(f"Successfully generated image with {service_name}")
+                    return result
+                elif "error" in result:
+                    error_msg = f"{service_name} error: {result['error']}"
+                    print(error_msg)
+                    errors.append({"service": service_name, "error": error_msg})
+                else:
+                    error_msg = f"Unexpected response format from {service_name}"
+                    print(error_msg)
+                    errors.append({"service": service_name, "error": error_msg})
+            else:
+                error_msg = f"Unexpected return type from {service_name}: {type(result)}"
+                print(error_msg)
+                errors.append({"service": service_name, "error": error_msg})
+                
+        except Exception as e:
+            error_msg = f"Error with {service_name}: {str(e)}"
+            print(f"{error_msg}\n{traceback.format_exc()}")
+            errors.append({"service": service_name, "error": str(e)})
+    
+    # If we get here, all services failed
+    error_details = "\n".join([f"- {e['service']}: {e['error']}" for e in errors])
+    final_error = f"All image generation attempts failed. Details:\n{error_details}"
+    print(f"\n=== Image Generation Failed ===\n{final_error}")
+    return {"error": final_error, "attempts": errors}
+
+async def _try_stability_ai(
+    prompt: str, 
+    face_image_b64: Optional[str], 
+    child_name: str,
+    width: int = 1024,
+    height: int = 1024,
+    strength: float = 0.7
+) -> Dict[str, str]:
+    """
+    Generate or transform an image using Stability AI's API.
+    
+    Args:
+        prompt: Text prompt for image generation
+        face_image_b64: Optional base64-encoded image for image-to-image
+        child_name: Name of the child (for prompt enhancement)
+        width: Width of the output image (default: 1024)
+        height: Height of the output image (default: 1024)
+        strength: How much to transform the input image (0.0 to 1.0, default: 0.7)
+        
+    Returns:
+        Dictionary with 'image' (base64) or 'error' key
+    """
+    if not STABILITY_API_KEY:
+        return {"error": "Stability API key not configured"}
+    
+    # Enhance the prompt with Flapjack style
+    enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
+    print(f"\n=== Generating image with Stability AI ===")
+    print(f"Prompt: {enhanced_prompt}")
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {STABILITY_API_KEY}",
+            "Accept": "application/json"
+        }
+        
+        # Prepare the request data
+        data = {
+            "prompt": enhanced_prompt,
+            "output_format": "png",
+            "width": width,
+            "height": height,
+            "samples": 1,
+            "steps": 30,
+        }
+        
+        files = {"none": ''}  # Required by the API even if not used
+        
+        # If we have an input image, add it to the request
         if face_image_b64:
-            print("Using image-to-image with face")
-            # Prepare the request data for image-to-image
+            print("Using image-to-image transformation")
             try:
-                # Fix base64 padding and remove data URL prefix
-                face_image_b64 = fix_base64_padding(face_image_b64)
-                # Decode and validate the image
-                image_data = base64.b64decode(face_image_b64, validate=True)
-                print(f"Successfully decoded image data: {len(image_data)} bytes")
+                # Remove data URL prefix if present
+                if "," in face_image_b64:
+                    face_image_b64 = face_image_b64.split(",")[1]
+                    
+                # Convert base64 to bytes
+                image_data = base64.b64decode(face_image_b64)
                 
-                files = {"init_image": ("face.jpg", image_data, "image/jpeg")}
-                data = {
-                    "image_strength": 0.4,
-                    "init_image_mode": "IMAGE_STRENGTH",
-                    "text_prompts[0][text]": enhanced_prompt,
-                    "text_prompts[0][weight]": 1.0,
-                    "cfg_scale": 8,
-                    "samples": 1,
-                    "steps": 35,
-                    "style_preset": "cartoon"
-                }
+                # Save to a temporary file
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+                    temp_file.write(image_data)
+                    temp_path = temp_file.name
                 
-                response = requests.post(
-                    "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image",
-                    headers={
-                        "Accept": "application/json",
-                        "Authorization": f"Bearer {STABILITY_API_KEY}"
-                    },
-                    files=files,
-                    data=data,
-                    timeout=60
-                )
+                try:
+                    # Open the image and ensure it's in RGB mode
+                    with Image.open(temp_path) as img:
+                        img = img.convert("RGB")
+                        img_io = io.BytesIO()
+                        img.save(img_io, format='PNG')
+                        img_io.seek(0)
+                        
+                        files["image"] = ("input.png", img_io, "image/png")
+                        data["mode"] = "image-to-image"
+                        data["strength"] = strength
+                        
+                        # Make the API request
+                        response = requests.post(
+                            f"{STABILITY_API_HOST}/v2beta/stable-image/generate/sd3",
+                            headers=headers,
+                            files=files,
+                            data=data,
+                            timeout=60
+                        )
+                finally:
+                    # Clean up the temporary file
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
             except Exception as e:
                 error_msg = f"Error processing face image: {str(e)}"
                 print(error_msg)
                 return {"error": error_msg}
         else:
-            print("Using text-to-image (no face provided)")
-            # Prepare the request data for text-to-image
-            data = {
-                "text_prompts[0][text]": enhanced_prompt,
-                "text_prompts[0][weight]": 1.0,
-                "cfg_scale": 8,
-                "samples": 1,
-                "steps": 35,
-                "style_preset": "cartoon"
-            }
-            
-            response = requests.post(
-                "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {STABILITY_API_KEY}"
-                },
-                json={
-                    "text_prompts": [{"text": enhanced_prompt, "weight": 1.0}],
-                    "cfg_scale": 8,
-                    "steps": 35,
-                    "style_preset": "cartoon"
-                },
-                timeout=60  # 60 seconds timeout
-            )
-        
-        print(f"Status code: {response.status_code}")
-        
-        try:
-            result = response.json()
-            print(f"Response keys: {list(result.keys())}")
-            
-            if not response.ok:
-                error_msg = f"Stability AI API error: {result.get('name', 'Unknown error')} - {result.get('message', 'No error message')}"
+            # Text-to-image generation
+            print("Using text-to-image generation")
+            try:
+                response = requests.post(
+                    f"{STABILITY_API_HOST}/v2beta/stable-image/generate/sd3",
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=60
+                )
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Request to Stability AI API failed: {str(e)}"
                 print(error_msg)
                 return {"error": error_msg}
-            
-            if result.get("artifacts"):
-                print(f"Successfully generated {len(result['artifacts'])} artifacts")
-                if result['artifacts'][0].get('base64'):
-                    return f"data:image/png;base64,{result['artifacts'][0]['base64']}"
-                else:
-                    error_msg = "No base64 data in artifacts"
-            else:
-                error_msg = "No artifacts in response"
-                
+        
+        # Check for errors
+        if response.status_code != 200:
+            error_msg = f"Stability API error: {response.status_code} - {response.text}"
             print(error_msg)
             return {"error": error_msg}
-            
-        except Exception as e:
-            error_msg = f"Error parsing response: {str(e)}"
-            print(f"{error_msg}\nResponse content: {response.text[:500]}...")
-            return {"error": error_msg, "response": response.text[:500]}
-            
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Request failed: {str(e)}"
-        print(error_msg)
-        return {"error": error_msg}
+        
+        # Return the image as base64
+        image_base64 = base64.b64encode(response.content).decode('utf-8')
+        return {"image": f"data:image/png;base64,{image_base64}", "source": "stability-ai-sd3"}
+        
     except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}"
+        error_msg = f"Error with Stability AI: {str(e)}"
         print(f"{error_msg}\n{traceback.format_exc()}")
         return {"error": error_msg}
 
@@ -652,7 +723,8 @@ async def generate_story(
     theme: str = Form(None),
     face_image: str = Form(None)
 ):
-    """Generate an 8-page pirate story with Flapjack-style images.
+    """
+    Generate an 8-page pirate story with Flapjack-style images.
     
     This endpoint generates the story and waits for all images to be ready before returning.
     """
@@ -675,8 +747,14 @@ async def generate_story(
     # Create story parts with initial state
     parts = []
     story_id = str(uuid.uuid4())
-    image_generation_tasks = []
     
+    # Create StoryResponse object
+    story_response = StoryResponse(
+        title=story_data["title"],
+        parts=[]
+    )
+    
+    # Initialize story parts
     for i, page in enumerate(story_data["pages"][:8]):  # Limit to 8 pages
         image_prompt = page.get("image_prompt", "") if isinstance(page, dict) else ""
         
@@ -685,59 +763,40 @@ async def generate_story(
             image_prompt=image_prompt,
             image_status="pending"
         )
-        parts.append(part)
+        story_response.parts.append(part)
     
     # Store the initial story state
     story_states[story_id] = {
-        "title": story_data["title"],
-        "parts": [part.dict() for part in parts],
+        "title": story_response.title,
+        "story": story_response,  # Store the actual StoryResponse object
         "updated_at": time.time(),
         "completed": False,
-        "total_pages": len(parts),
+        "total_pages": len(story_response.parts),
         "completed_pages": 0
     }
     
-    # Generate images for all pages with prompts
-    for i, part in enumerate(parts):
+    # Generate images for all pages with prompts in the background
+    for i, part in enumerate(story_response.parts):
         if part.image_prompt:
-            # Create a task for each image generation
-            task = asyncio.create_task(
-                generate_image_for_page(
-                    story_id=story_id,
-                    page_index=i,
-                    prompt=part.image_prompt,
-                    child_name=child_name,
-                    face_image=face_image
-                )
+            background_tasks.add_task(
+                generate_image_for_page,
+                story_id=story_id,
+                page_index=i,
+                prompt=part.image_prompt,
+                child_name=child_name,
+                face_image=face_image,
+                width=1024,
+                height=1024,
+                strength=0.7
             )
-            image_generation_tasks.append(task)
     
-    # Wait for all images to be generated with a timeout
-    if image_generation_tasks:
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*image_generation_tasks, return_exceptions=True),
-                timeout=300  # 5 minutes timeout for all images
-            )
-        except asyncio.TimeoutError:
-            print("Warning: Image generation timed out for some pages")
-    
-    # Mark story as completed
-    if story_id in story_states:
-        story_states[story_id]["completed"] = True
-        await broadcast_update(story_id)
-    
-    # Get the final state
-    final_state = story_states.get(story_id, {
-        "title": story_data["title"],
-        "parts": [part.dict() for part in parts]
-    })
-    
+    # Return immediately with the story ID and initial state
     return {
         "story_id": story_id,
-        "title": final_state["title"],
-        "parts": final_state["parts"],
-        "completed": True
+        "title": story_response.title,
+        "parts": [part.dict() for part in story_response.parts],
+        "completed": False,
+        "websocket_url": f"ws://{os.getenv('HOST', 'localhost')}:{os.getenv('PORT', '8000')}/ws/{story_id}"
     }
 
 
@@ -807,50 +866,89 @@ async def test_story(name: str, theme: str):
 
 
 
-async def generate_image_for_page(story_id: str, page_index: int, prompt: str, child_name: str, face_image: Optional[str] = None):
-    """Generate an image for a story page and update the story state."""
-    print(f"\n=== Starting image generation for page {page_index + 1} ===")
-    print(f"Prompt: {prompt}")
+async def generate_image_for_page(
+    story_id: str, 
+    page_index: int, 
+    prompt: str, 
+    child_name: str, 
+    face_image: Optional[str] = None,
+    width: int = 1024,
+    height: int = 1024,
+    strength: float = 0.7
+):
+    """
+    Generate an image for a story page and update the story state.
+    
+    Args:
+        story_id: ID of the story to update
+        page_index: Index of the page to generate an image for
+        prompt: Text prompt for image generation
+        child_name: Name of the child (for prompt enhancement)
+        face_image: Optional base64-encoded image for image-to-image
+        width: Width of the output image (default: 1024)
+        height: Height of the output image (default: 1024)
+        strength: How much to transform the input image (0.0 to 1.0, default: 0.7)
+    """
+    if story_id not in story_states:
+        print(f"Story ID {story_id} not found in story_states")
+        return {
+            "story_id": story_id,
+            "page_index": page_index,
+            "status": "failed",
+            "error": "Story not found"
+        }
+    
+    story_state = story_states[story_id]
     
     try:
-        # Update status to processing
-        if story_id in story_states:
-            story_states[story_id]["parts"][page_index]["image_status"] = "processing"
-            story_states[story_id]["updated_at"] = time.time()
+        # Update status to 'generating'
+        if page_index < len(story_state["story"].parts):
+            story_state["story"].parts[page_index].image_status = "generating"
+            story_state["updated_at"] = time.time()
             await broadcast_update(story_id)
         
-        # Try Replicate with the face image if available
-        result = await generate_image_with_replicate(prompt, child_name, face_image)
+        # Generate the image
+        image_result = await generate_image(
+            prompt=prompt,
+            child_name=child_name,
+            face_image_b64=face_image,
+            width=width,
+            height=height,
+            strength=strength
+        )
         
-        if result and "image" in result:
-            print(f"Successfully generated image for page {page_index + 1}")
-            
-            # Update the story state with the generated image
-            if story_id in story_states:
-                story_states[story_id]["parts"][page_index]["image_url"] = f"data:image/png;base64,{result['image']}"
-                story_states[story_id]["parts"][page_index]["image_status"] = "completed"
-                story_states[story_id]["completed_pages"] = story_states[story_id].get("completed_pages", 0) + 1
-                story_states[story_id]["updated_at"] = time.time()
+        # Update the story with the result
+        if "image" in image_result:
+            if page_index < len(story_state["story"].parts):
+                story_state["story"].parts[page_index].image_url = image_result["image"]
+                story_state["story"].parts[page_index].image_status = "completed"
+                story_state["completed_pages"] = story_state.get("completed_pages", 0) + 1
+                story_state["updated_at"] = time.time()
+                print(f"Generated image for page {page_index}")
+                
+                # Broadcast the update
                 await broadcast_update(story_id)
+                
+                return {
+                    "story_id": story_id,
+                    "page_index": page_index,
+                    "status": "completed",
+                    "source": image_result.get("source", "unknown")
+                }
+        
+        # If we get here, image generation failed
+        error_msg = image_result.get("error", "Unknown error")
+        print(f"Failed to generate image for page {page_index}: {error_msg}")
+        
+        if page_index < len(story_state["story"].parts):
+            story_state["story"].parts[page_index].error = error_msg
+            story_state["story"].parts[page_index].image_status = "failed"
+            story_state["completed_pages"] = story_state.get("completed_pages", 0) + 1
+            story_state["updated_at"] = time.time()
             
-            return {
-                "story_id": story_id,
-                "page_index": page_index,
-                "status": "completed",
-                "source": result.get("source", "unknown")
-            }
-        
-        # If we get here, all providers failed
-        error_msg = "All image generation attempts failed"
-        print(error_msg)
-        
-        if story_id in story_states:
-            story_states[story_id]["parts"][page_index]["error"] = error_msg
-            story_states[story_id]["parts"][page_index]["image_status"] = "failed"
-            story_states[story_id]["completed_pages"] = story_states[story_id].get("completed_pages", 0) + 1
-            story_states[story_id]["updated_at"] = time.time()
+            # Broadcast the update
             await broadcast_update(story_id)
-            
+        
         return {
             "story_id": story_id,
             "page_index": page_index,
@@ -859,17 +957,18 @@ async def generate_image_for_page(story_id: str, page_index: int, prompt: str, c
         }
         
     except Exception as e:
-        error_msg = f"Error generating image: {str(e)}"
-        print(error_msg)
-        traceback.print_exc()
+        error_msg = f"Error generating image for page {page_index}: {str(e)}"
+        print(f"{error_msg}\n{traceback.format_exc()}")
         
-        if story_id in story_states:
-            story_states[story_id]["parts"][page_index]["error"] = error_msg
-            story_states[story_id]["parts"][page_index]["image_status"] = "failed"
-            story_states[story_id]["completed_pages"] = story_states[story_id].get("completed_pages", 0) + 1
-            story_states[story_id]["updated_at"] = time.time()
-            await broadcast_update(story_id)
+        if page_index < len(story_state["story"].parts):
+            story_state["story"].parts[page_index].error = error_msg
+            story_state["story"].parts[page_index].image_status = "failed"
+            story_state["completed_pages"] = story_state.get("completed_pages", 0) + 1
+            story_state["updated_at"] = time.time()
             
+            # Broadcast the update
+            await broadcast_update(story_id)
+        
         return {
             "story_id": story_id,
             "page_index": page_index,
@@ -878,63 +977,158 @@ async def generate_image_for_page(story_id: str, page_index: int, prompt: str, c
         }
 
 async def broadcast_update(story_id: str):
-    """Send updates to all connected WebSocket clients for this story."""
+    """
+    Send updates to all connected WebSocket clients for this story.
+    
+    Args:
+        story_id: The ID of the story to broadcast updates for
+    """
     if story_id not in active_connections:
         return
         
     story_data = story_states.get(story_id)
-    if not story_data:
+    if not story_data or "story" not in story_data:
         return
-        
-    for websocket in list(active_connections[story_id]):
+    
+    # Prepare the update data
+    update_data = {
+        "story_id": story_id,
+        "title": story_data["title"],
+        "parts": [part.dict() for part in story_data["story"].parts],
+        "completed": story_data.get("completed", False),
+        "completed_pages": story_data.get("completed_pages", 0),
+        "total_pages": story_data.get("total_pages", 0)
+    }
+    
+    # Send the update to all connected clients
+    disconnected_clients = []
+    
+    for websocket in active_connections[story_id]:
         try:
             await websocket.send_json({
                 "type": "update",
-                "data": story_data
+                "data": update_data
             })
         except Exception as e:
-            print(f"Error broadcasting update: {str(e)}")
-            # Remove disconnected clients
-            active_connections[story_id].remove(websocket)
-            if not active_connections[story_id]:
-                del active_connections[story_id]
+            print(f"Error broadcasting to WebSocket: {str(e)}")
+            disconnected_clients.append(websocket)
+    
+    # Clean up disconnected clients
+    if disconnected_clients:
+        for websocket in disconnected_clients:
+            if websocket in active_connections[story_id]:
+                active_connections[story_id].remove(websocket)
+        
+        if not active_connections[story_id]:
+            del active_connections[story_id]
 
 @app.websocket("/ws/{story_id}")
 async def websocket_endpoint(websocket: WebSocket, story_id: str):
-    """WebSocket endpoint for real-time updates on story generation."""
+    """
+    WebSocket endpoint for real-time updates on story generation.
+    
+    Args:
+        websocket: The WebSocket connection
+        story_id: The ID of the story to get updates for
+    """
     await websocket.accept()
     
-    # Add to active connections
+    # Add client to active connections
     if story_id not in active_connections:
         active_connections[story_id] = set()
     active_connections[story_id].add(websocket)
     
     try:
-        # Send current state if available
+        # Send current state immediately if available
         if story_id in story_states:
+            story_data = story_states[story_id]
+            update_data = {
+                "story_id": story_id,
+                "title": story_data["title"],
+                "parts": [part.dict() for part in story_data["story"].parts],
+                "completed": story_data.get("completed", False),
+                "completed_pages": story_data.get("completed_pages", 0),
+                "total_pages": story_data.get("total_pages", 0)
+            }
+            
             await websocket.send_json({
                 "type": "update",
-                "data": story_states[story_id]
+                "data": update_data
             })
+        else:
+            # If story doesn't exist, send an error and close the connection
+            await websocket.send_json({
+                "type": "error",
+                "error": "Story not found"
+            })
+            await websocket.close()
+            return
             
-        # Keep connection open
+        # Keep connection open and handle incoming messages
         while True:
-            await asyncio.sleep(60)  # Keep connection alive
-            
-    except WebSocketDisconnect:
-        # Remove connection when client disconnects
+            try:
+                # Set a timeout to periodically check if the connection is still alive
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                
+                # Handle ping/pong for keepalive
+                if data == "ping":
+                    await websocket.send_text("pong")
+                    
+            except asyncio.TimeoutError:
+                # Send a ping to check if the connection is still alive
+                try:
+                    await websocket.send_text("ping")
+                except:
+                    # Connection is dead, break the loop
+                    break
+                    
+            except WebSocketDisconnect:
+                # Client disconnected normally
+                break
+                
+            except Exception as e:
+                print(f"WebSocket receive error: {str(e)}")
+                break
+                
+    except Exception as e:
+        print(f"WebSocket error: {str(e)}")
+        
+    finally:
+        # Clean up on disconnect
         if story_id in active_connections and websocket in active_connections[story_id]:
             active_connections[story_id].remove(websocket)
             if not active_connections[story_id]:
                 del active_connections[story_id]
+        
+        try:
+            await websocket.close()
+        except:
+            pass
 
 @app.get("/story/{story_id}")
 async def get_story(story_id: str):
-    """Get the current state of a story."""
-    if story_id not in story_states:
-        raise HTTPException(status_code=404, detail="Story not found")
+    """
+    Get the current state of a story.
+    
+    Args:
+        story_id: The ID of the story to retrieve
         
-    return story_states[story_id]
+    Returns:
+        The story data including title, parts, and generation status
+    """
+    story_data = story_states.get(story_id)
+    if not story_data or "story" not in story_data:
+        raise HTTPException(status_code=404, detail="Story not found")
+    
+    return {
+        "story_id": story_id,
+        "title": story_data["title"],
+        "parts": [part.dict() for part in story_data["story"].parts],
+        "completed": story_data.get("completed", False),
+        "completed_pages": story_data.get("completed_pages", 0),
+        "total_pages": story_data.get("total_pages", 0),
+        "updated_at": story_data.get("updated_at", 0)
+    }
 
 if __name__ == "__main__":
     import uvicorn
