@@ -9,7 +9,7 @@ import json
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
-from pydantic import BaseModel, Field, Json
+from pydantic import BaseModel, Field, Json, HttpUrl
 import requests
 from PIL import Image, UnidentifiedImageError
 from io import BytesIO
@@ -19,6 +19,8 @@ import time
 import httpx
 import json
 import tempfile
+import numpy as np
+import stability_sdk.interfaces.gooseai.generation.generation_pb2 as generation
 
 # In-memory storage for story state (in a real app, use a database)
 story_states = {}
@@ -238,86 +240,133 @@ def fix_base64_padding(b64_string: str) -> str:
     
     return b64_string
 
-async def generate_image_with_replicate(prompt: str, child_name: str, face_image_b64: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Generate an image using Replicate API asynchronously."""
+async def generate_image_with_replicate(
+    prompt: str, 
+    child_name: str, 
+    face_image_b64: Optional[str] = None,
+    strength: float = 0.7,
+    width: int = 1024,
+    height: int = 1024
+) -> Optional[Dict[str, Any]]:
+    """
+    Generate an image using Replicate API asynchronously.
+    
+    Args:
+        prompt: Text prompt for image generation
+        child_name: Name of the child (used for prompt enhancement)
+        face_image_b64: Optional base64-encoded image for image-to-image
+        strength: How much to transform the input image (0.0 to 1.0)
+        width: Width of the output image
+        height: Height of the output image
+    """
     if not REPLICATE_API_KEY:
-        return None
+        return {"error": "Replicate API key not configured"}
         
+    temp_path = None
     try:
         # Enhance the prompt with Flapjack style
         enhanced_prompt = create_flapjack_style_prompt(prompt, child_name)
         print(f"\n=== Generating image with Replicate ===")
         print(f"Prompt: {enhanced_prompt}")
         
-        # Prepare the input parameters
+        # Prepare input parameters
         input_params = {
             "prompt": enhanced_prompt,
-            "width": 1024,
-            "height": 1024,
+            "width": width,
+            "height": height,
             "num_outputs": 1,
+            "num_inference_steps": 50,
             "guidance_scale": 7.5,
-            "num_inference_steps": 35,
+            "scheduler": "K_EULER",
+            "seed": None,
+            "negative_prompt": "blurry, low quality, distorted, disfigured, extra limbs, extra fingers, cropped, out of frame, watermark, signature, text"
         }
         
-        # If we have a face image, prepare for image-to-image
+        # Add image-to-image parameters if input image is provided
         if face_image_b64:
-            print("Using face image for image-to-image generation")
-            try:
+            # Save the base64 image to a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
                 # Remove data URL prefix if present
-                if "," in face_image_b64:
-                    face_image_b64 = face_image_b64.split(",", 1)[1]
+                image_data = base64.b64decode(face_image_b64.split(",")[-1])
+                temp_file.write(image_data)
+                temp_path = temp_file.name
+            
+            try:
+                # Open the image and ensure it's in RGB mode
+                with Image.open(temp_path) as img:
+                    img = img.convert("RGB")
+                    img.save(temp_path, "PNG")
                 
-                # Decode the base64 image
-                image_data = base64.b64decode(face_image_b64)
+                # Update parameters for image-to-image
+                input_params.update({
+                    "image": open(temp_path, "rb"),
+                    "prompt_strength": strength,
+                    "num_inference_steps": 75,  # More steps for better quality with img2img
+                })
                 
-                # Save to a temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
-                    temp_file.write(image_data)
-                    temp_file_path = temp_file.name
+                print(f"Using image-to-image with strength: {strength}")
                 
-                # Add image to input parameters
-                input_params["image"] = open(temp_file_path, "rb")
-                input_params["prompt_strength"] = 0.6
+                # Call the Replicate API with image-to-image
+                output = await asyncio.to_thread(
+                    replicate.run,
+                    "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+                    input=input_params
+                )
                 
-                # Use a different model for image-to-image
-                model = "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b"
-            except Exception as e:
-                print(f"Error processing face image: {str(e)}")
-                # Fall back to text-to-image if there's an error with the face image
-                model = "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b"
+                # Process the output URL
+                if not output or not isinstance(output, list) or not output[0]:
+                    return {"error": "Unexpected output format from Replicate"}
+                
+                image_url = output[0]
+                response = requests.get(image_url)
+                if response.status_code != 200:
+                    return {"error": f"Failed to download generated image: {response.status_code}"}
+                
+                # Convert to base64
+                image_base64 = base64.b64encode(response.content).decode("utf-8")
+                return {"image": f"data:image/png;base64,{image_base64}", "source": "replicate-sdxl"}
+                
+            finally:
+                # Clean up the temporary file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
         else:
-            model = "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b"
-            print("No face image provided, using text-to-image")
-        
-        # Use SDXL for image generation
-        output = await asyncio.to_thread(
-            replicate.run,
-            model,
-            input=input_params
-        )
-        
-        # Clean up the temporary file if it exists
-        if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
-            os.unlink(temp_file_path)
-        
-        if isinstance(output, list) and len(output) > 0:
-            # Download the image asynchronously
-            async with httpx.AsyncClient() as client:
-                response = await client.get(output[0])
-                if response.status_code == 200:
-                    return {
-                        "image": base64.b64encode(response.content).decode('utf-8'),
-                        "source": "replicate-sdxl"
-                    }
-                    
-            error_msg = f"Failed to download image from Replicate: {response.status_code}"
-            print(error_msg)
-            return {"error": error_msg}
+            # Text-to-image generation
+            print("Using text-to-image generation")
+            output = await asyncio.to_thread(
+                replicate.run,
+                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+                input=input_params
+            )
+            
+            # Process the output URL
+            if not output or not isinstance(output, list) or not output[0]:
+                return {"error": "Unexpected output format from Replicate"}
+            
+            image_url = output[0]
+            response = requests.get(image_url)
+            if response.status_code != 200:
+                return {"error": f"Failed to download generated image: {response.status_code}"}
+            
+            # Convert to base64
+            image_base64 = base64.b64encode(response.content).decode("utf-8")
+            return {"image": f"data:image/png;base64,{image_base64}", "source": "replicate-sdxl"}
             
     except Exception as e:
         error_msg = f"Error with Replicate: {str(e)}"
         print(f"{error_msg}\n{traceback.format_exc()}")
         return {"error": error_msg}
+        
+    finally:
+        # Ensure temporary file is cleaned up
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception as e:
+                print(f"Error cleaning up temporary file: {str(e)}")
 
 async def generate_image(prompt: str, child_name: str) -> Dict[str, Any]:
     """
@@ -692,6 +741,54 @@ async def generate_story(
     }
 
 
+
+class ImageTransformRequest(BaseModel):
+    image_base64: str
+    prompt: str = "A colorful cartoon version of the input image"
+    strength: float = 0.7  # How much to transform the image (0.0 to 1.0)
+
+@app.post("/transform-image")
+async def transform_image(request: ImageTransformRequest):
+    """
+    Transform an image using an image-to-image model.
+    Takes a base64-encoded image and returns a transformed version.
+    """
+    try:
+        # Decode the base64 image
+        image_data = base64.b64decode(request.image_base64.split(",")[-1])
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        
+        # Save the image to a temporary file
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+            image.save(temp_file, format="PNG")
+            temp_path = temp_file.name
+        
+        try:
+            # Call the image generation function with the image path
+            result = await generate_image_with_replicate(
+                prompt=request.prompt,
+                child_name="transformed",
+                face_image_b64=request.image_base64,
+                strength=request.strength
+            )
+            
+            if "error" in result:
+                raise HTTPException(status_code=500, detail=result["error"])
+                
+            return {"image": result["image"]}
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error generating image: {str(e)}")
+            
+        finally:
+            # Clean up the temporary file
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+                
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
 
 @app.get("/health")
 async def health_check():
