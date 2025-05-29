@@ -1,23 +1,23 @@
 # Core Dependencies
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-python-dotenv==1.0.0
-pydantic==1.10.13  # Pinned to a stable version that works with stability-sdk
-httpx==0.24.1
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+pydantic>=2.0.0  # Updated to pydantic v2 for Python 3.13 compatibility
+httpx>=0.24.1
 
 # Image Processing
-Pillow==10.0.0
-opencv-python-headless==4.8.0.76
-numpy==1.24.3
+Pillow>=10.0.0
+opencv-python-headless>=4.8.0.76
+numpy>=1.26.0  # Updated to a version that supports Python 3.13
 
 # AI Services
 replicate==0.25.1
 requests==2.31.0
-grpcio==1.60.0  # Required by stability-sdk
-grpcio-tools==1.60.0  # Required by stability-sdk
-stability-sdk==0.5.1
-protobuf==3.20.3  # Specific version known to work with stability-sdk
+grpcio>=1.62.0  # Updated to a version with pre-built wheels
+grpcio-tools>=1.62.0  # Updated to a version with pre-built wheels
+stability-sdk==0.8.6
+protobuf>=4.21.6,<5.0.0  # Updated to be compatible with grpcio-tools
 
 # Required for stability-sdk
 google-api-python-client==2.108.0
