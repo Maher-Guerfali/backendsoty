@@ -7,6 +7,7 @@ import traceback
 import uuid
 import json
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
+from typing import Dict, List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from pydantic import BaseModel, Field, Json, HttpUrl
@@ -27,6 +28,33 @@ story_states = {}
 
 # WebSocket connections for real-time updates
 active_connections = {}
+
+# Story store for tracking story generation
+STORY_STORE: Dict[str, dict] = {}
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+
+    async def connect(self, story_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if story_id not in self.active_connections:
+            self.active_connections[story_id] = []
+        self.active_connections[story_id].append(websocket)
+
+    def disconnect(self, story_id: str, websocket: WebSocket):
+        if story_id in self.active_connections:
+            self.active_connections[story_id].remove(websocket)
+
+    async def broadcast(self, story_id: str, message: dict):
+        if story_id in self.active_connections:
+            for connection in self.active_connections[story_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    print(f"Error sending WebSocket message: {e}")
+
+manager = ConnectionManager()
 
 # Set numpy to ignore some warnings
 import warnings
@@ -757,10 +785,20 @@ async def generate_pirate_image(request: PirateImageRequest):
         raise HTTPException(status_code=500, detail=error_msg)
 
 @app.post("/generate-story")
+@app.websocket("/ws/{story_id}")
+async def websocket_endpoint(websocket: WebSocket, story_id: str):
+    await manager.connect(story_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # Keep connection alive
+    except WebSocketDisconnect:
+        manager.disconnect(story_id, websocket)
+
+@app.post("/generate-story")
 async def generate_story(
     background_tasks: BackgroundTasks,
-    child_name: str = Form(None),
-    theme: str = Form(None),
+    child_name: str = Form(...),
+    theme: str = Form(...),
     face_image: str = Form(None)
 ):
     """
@@ -793,44 +831,34 @@ async def generate_story(
         title=story_data["title"],
         parts=[]
     )
+    # Generate story text first
+    try:
+        story_response = await generate_story_text(child_name, theme)
+    except Exception as e:
+        logger.error(f"Error generating story text: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to generate story text")
     
-    # Initialize story parts
-    for i, page in enumerate(story_data["pages"][:8]):  # Limit to 8 pages
-        image_prompt = page.get("image_prompt", "") if isinstance(page, dict) else ""
-        
-        part = StoryPart(
-            text=page["story_text"] if isinstance(page, dict) else page,
-            image_prompt=image_prompt,
-            image_status="pending"
-        )
-        story_response.parts.append(part)
+    story_id = str(uuid.uuid4())
     
-    # Store the initial story state
-    story_states[story_id] = {
+    # Store initial story data
+    story_data = {
+        "story_id": story_id,
         "title": story_response.title,
-        "story": story_response,  # Store the actual StoryResponse object
-        "updated_at": time.time(),
-        "completed": False,
-        "total_pages": len(story_response.parts),
-        "completed_pages": 0
+        "parts": [dict(part) for part in story_response.parts],
+        "status": "generating_images",
+        "completed": False
     }
     
-    # Generate images for all pages with prompts in the background
-    for i, part in enumerate(story_response.parts):
-        if part.image_prompt:
-            background_tasks.add_task(
-                generate_image_for_page,
-                story_id=story_id,
-                page_index=i,
-                prompt=part.image_prompt,
-                child_name=child_name,
-                face_image=face_image,
-                width=1024,
-                height=1024,
-                strength=0.7
-            )
+    STORY_STORE[story_id] = story_data
     
-    # Return immediately with the story ID and initial state
+    # Start image generation in background
+    background_tasks.add_task(
+        generate_story_images,
+        story_id=story_id,
+        story_response=story_response,
+        face_image=face_image
+    )
+    
     return {
         "story_id": story_id,
         "title": story_response.title,
@@ -839,7 +867,84 @@ async def generate_story(
         "websocket_url": f"ws://{os.getenv('HOST', 'localhost')}:{os.getenv('PORT', '8000')}/ws/{story_id}"
     }
 
+async def generate_story_images(story_id: str, story_response, face_image: str = None):
+    """Generate images for all story parts sequentially"""
+    try:
+        story_data = STORY_STORE.get(story_id)
+        if not story_data:
+            logger.error(f"Story {story_id} not found in store")
+            return
 
+        # Initialize parts in story data if not present
+        if "parts" not in story_data:
+            story_data["parts"] = []
+        
+        for i, part in enumerate(story_response.parts):
+            # Update status
+            part["image_status"] = "processing"
+            story_data["parts"][i] = part
+            await manager.broadcast(story_id, {
+                "part_index": i,
+                "status": "processing"
+            })
+
+            try:
+                # Generate image
+                image_result = await generate_image(
+                    prompt=part["image_prompt"],
+                    face_image_b64=face_image,
+                    child_name=story_data.get("child_name", "pirate"),
+                    width=1024,
+                    height=1024
+                )
+                
+                if "error" in image_result:
+                    part["image_status"] = "failed"
+                    part["error"] = image_result["error"]
+                else:
+                    part["image_url"] = image_result.get("image")
+                    part["image_status"] = "completed"
+                
+                # Update the part in the story data
+                story_data["parts"][i] = part
+                
+                # Notify via WebSocket
+                await manager.broadcast(story_id, {
+                    "part_index": i,
+                    "status": part["image_status"],
+                    "image_url": part.get("image_url"),
+                    "error": part.get("error")
+                })
+                
+            except Exception as e:
+                logger.error(f"Error generating image for part {i}: {str(e)}")
+                part["image_status"] = "failed"
+                part["error"] = str(e)
+                story_data["parts"][i] = part
+                await manager.broadcast(story_id, {
+                    "part_index": i,
+                    "status": "failed",
+                    "error": str(e)
+                })
+            
+            # Small delay between image generations
+            await asyncio.sleep(1)
+        
+        # Mark story as completed
+        story_data["status"] = "completed"
+        story_data["completed"] = True
+        await manager.broadcast(story_id, {"status": "completed"})
+        
+    except Exception as e:
+        logger.error(f"Error in generate_story_images: {str(e)}")
+        if story_id in STORY_STORE:
+            story_data = STORY_STORE[story_id]
+            story_data["status"] = "failed"
+            story_data["error"] = str(e)
+            await manager.broadcast(story_id, {
+                "status": "failed",
+                "error": str(e)
+            })
 
 class ImageTransformRequest(BaseModel):
     image_base64: str
