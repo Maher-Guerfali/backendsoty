@@ -814,30 +814,33 @@ async def generate_story(
     if not child_name or not theme:
         raise HTTPException(status_code=400, detail="Child name and theme are required")
     
-    # Generate the story text
-    print("Generating story text...")
-    story_data = generate_pirate_story_with_groq(child_name, theme)
-    
-    if not story_data:
-        print("Using fallback story")
-        story_data = create_fallback_pirate_story(child_name)
-    
-    # Create story parts with initial state
-    parts = []
-    story_id = str(uuid.uuid4())
-    
-    # Create StoryResponse object
-    story_response = StoryResponse(
-        title=story_data["title"],
-        parts=[]
-    )
     # Generate story text first
+    print("Generating story text...")
     try:
         story_response = await generate_story_text(child_name, theme)
     except Exception as e:
         logger.error(f"Error generating story text: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to generate story text")
+        # Fallback to simpler story generation if the main method fails
+        print("Using fallback story generation...")
+        story_data = generate_pirate_story_with_groq(child_name, theme)
+        if not story_data:
+            print("Using hardcoded fallback story")
+            story_data = create_fallback_pirate_story(child_name)
+        
+        # Convert the story data to StoryResponse format
+        parts = [
+            StoryPart(
+                text=page["story_text"],
+                image_prompt=page["image_prompt"],
+                image_status="pending"
+            ) for page in story_data["pages"]
+        ]
+        story_response = StoryResponse(
+            title=story_data["title"],
+            parts=parts
+        )
     
+        # Generate a unique story ID
     story_id = str(uuid.uuid4())
     
     # Store initial story data
@@ -846,7 +849,9 @@ async def generate_story(
         "title": story_response.title,
         "parts": [dict(part) for part in story_response.parts],
         "status": "generating_images",
-        "completed": False
+        "completed": False,
+        "created_at": time.time(),
+        "updated_at": time.time()
     }
     
     STORY_STORE[story_id] = story_data
@@ -867,8 +872,35 @@ async def generate_story(
         "websocket_url": f"ws://{os.getenv('HOST', 'localhost')}:{os.getenv('PORT', '8000')}/ws/{story_id}"
     }
 
+async def generate_story_text(child_name: str, theme: str) -> StoryResponse:
+    """Generate story text using Groq API."""
+    print(f"Generating story for {child_name} with theme: {theme}")
+    story_data = generate_pirate_story_with_groq(child_name, theme)
+    
+    if not story_data:
+        print("Using fallback story")
+        story_data = create_fallback_pirate_story(child_name)
+    
+    # Convert the story data to StoryResponse format
+    parts = [
+        StoryPart(
+            text=page["story_text"],
+            image_prompt=page["image_prompt"],
+            image_status="pending"
+        ) for page in story_data["pages"]
+    ]
+    
+    return StoryResponse(
+        title=story_data["title"],
+        parts=parts
+    )
+
 async def generate_story_images(story_id: str, story_response, face_image: str = None):
     """Generate images for all story parts sequentially"""
+    if not story_id or not story_response or not story_response.parts:
+        logger.error(f"Invalid parameters for generate_story_images: story_id={story_id}, has_parts={bool(story_response and story_response.parts)}")
+        return
+        
     try:
         story_data = STORY_STORE.get(story_id)
         if not story_data:
