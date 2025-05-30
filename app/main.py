@@ -799,7 +799,7 @@ async def generate_story(
     background_tasks: BackgroundTasks,
     child_name: str = Form(...),
     theme: str = Form(...),
-    face_image: str = Form(None)
+    face_image: Union[UploadFile, str, None] = Form(None)
 ):
     """
     Generate an 8-page pirate story with Flapjack-style images.
@@ -813,6 +813,25 @@ async def generate_story(
     # Validate inputs
     if not child_name or not theme:
         raise HTTPException(status_code=400, detail="Child name and theme are required")
+    
+    # Process face image if provided
+    face_image_data = None
+    if face_image is not None:
+        try:
+            if isinstance(face_image, str):
+                # It's a base64 string
+                if face_image.startswith('data:image'):
+                    # Extract the base64 part after the comma
+                    face_image_data = face_image.split(',', 1)[1] if ',' in face_image else face_image
+                else:
+                    face_image_data = face_image
+            elif hasattr(face_image, 'file'):  # It's an UploadFile
+                face_image_data = (await face_image.read()).decode('utf-8')
+                
+            logger.info(f"Processed face image data: {face_image_data[:50]}..." if face_image_data else "No face image provided")
+        except Exception as e:
+            logger.error(f"Error processing face image: {str(e)}")
+            # Continue without the face image if there's an error
     
     # Generate story text first
     print("Generating story text...")
@@ -861,7 +880,7 @@ async def generate_story(
         generate_story_images,
         story_id=story_id,
         story_response=story_response,
-        face_image=face_image
+        face_image=face_image_data  # Use the processed face image data
     )
     
     return {
