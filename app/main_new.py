@@ -1,5 +1,7 @@
 import os
 import logging
+import time
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -30,7 +32,9 @@ origins = [
     "http://localhost:8000",
     "http://localhost:5173",
     "https://mystoria-alpha.vercel.app",
-    "https://*.vercel.app"
+    "https://*.vercel.app",
+    "http://localhost:*",  # Allow any localhost port
+    "https://*.localhost"  # Allow HTTPS localhost
 ]
 
 # Add CORS middleware with more explicit headers
@@ -38,10 +42,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["Content-Type", "Authorization"],
-    max_age=86400  # Cache preflight requests for 24 hours
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["Content-Type", "Authorization", "X-Requested-With", "Access-Control-Allow-Origin"],
+    max_age=86400,  # Cache preflight requests for 24 hours
+    allow_origin_regex="https://.*\.vercel\.app"  # Allow any subdomain of vercel.app
 )
 
 # Include routers
@@ -50,7 +55,36 @@ app.include_router(story_router, prefix="/api/v1", tags=["stories"])
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "version": "1.0.0"}
+    try:
+        # Check basic service status
+        service_status = "healthy"
+        
+        # Add more detailed health checks here
+        # For example, check database connection if using one
+        # Check API keys if available
+        
+        return {
+            "status": service_status,
+            "version": "1.0.0",
+            "timestamp": datetime.now().isoformat(),
+            "details": {
+                "environment": os.getenv("ENVIRONMENT", "production"),
+                "service": "story-generator",
+                "dependencies": {
+                    "fastapi": fastapi.__version__
+                }
+            }
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
 
 # Error handling
 @app.exception_handler(HTTPException)

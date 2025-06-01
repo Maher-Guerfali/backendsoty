@@ -146,9 +146,70 @@ async def generate_story_task(
         # Update story status
         if story_id in stories:
             stories[story_id].status = "generating_text"
+            logger.info(f"Starting text generation for story {story_id}")
+        else:
+            logger.error(f"Story {story_id} not found during generation")
+            return
         
         # Step 1: Generate the story text
-        story = await generator.generate_story(username, theme)
+        try:
+            story = await generator.generate_story(username, theme)
+            logger.info(f"Successfully generated text for story {story_id}")
+            
+            # Update story with generated text
+            if story_id in stories:
+                stories[story_id] = story
+            else:
+                logger.error(f"Story {story_id} disappeared during text generation")
+                return
+            
+        except Exception as e:
+            logger.error(f"Error generating story text for {story_id}: {str(e)}", exc_info=True)
+            if story_id in stories:
+                stories[story_id].status = "failed"
+                stories[story_id].error = str(e)
+            return
+            
+        # Step 2: Generate images if we have a face image
+        if face_image_url:
+            try:
+                logger.info(f"Starting image generation for story {story_id}")
+                
+                # Generate images concurrently
+                tasks = []
+                for part in story.parts:
+                    async def generate_image(part: StoryPart):
+                        try:
+                            part.image_url = await generator.generate_image(
+                                prompt=part.image_prompt,
+                                username=username,
+                                face_image_url=face_image_url
+                            )
+                            part.status = "completed"
+                            logger.info(f"Successfully generated image for part {part.part_number} of story {story_id}")
+                        except Exception as img_error:
+                            logger.error(f"Error generating image for part {part.part_number} of story {story_id}: {str(img_error)}")
+                            part.status = "failed"
+                            part.error = str(img_error)
+                    tasks.append(generate_image(part))
+                
+                await asyncio.gather(*tasks)
+                
+                # Update story status
+                if story_id in stories:
+                    stories[story_id].status = "completed"
+                    logger.info(f"Story {story_id} completed successfully")
+                
+            except Exception as e:
+                logger.error(f"Error during image generation for story {story_id}: {str(e)}", exc_info=True)
+                if story_id in stories:
+                    stories[story_id].status = "failed"
+                    stories[story_id].error = str(e)
+    except Exception as e:
+        logger.error(f"Fatal error in story generation for {story_id}: {str(e)}", exc_info=True)
+        if story_id in stories:
+            stories[story_id].status = "failed"
+            stories[story_id].error = str(e)
         
         # Update the story in storage
         if story_id in stories:
