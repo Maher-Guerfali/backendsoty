@@ -10,12 +10,15 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uvicorn
 
+# Import routers
+from app.api.endpoints.story import router as story_router
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Get PORT from environment variable
-PORT = int(os.getenv('PORT', '8000'))
+# Hardcode port to 8000
+PORT = 8000
 logger.info(f"Starting server on port: {PORT}")
 
 # Create FastAPI app
@@ -48,6 +51,9 @@ async def health_check():
                 "timestamp": datetime.now().isoformat()
             }
         )
+
+# Include routers
+app.include_router(story_router, prefix="/api/v1", tags=["stories"])
 
 # CORS Configuration
 origins = [

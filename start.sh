@@ -5,17 +5,8 @@ set -e
 # Enable script debugging
 set -x
 
-# Check if required environment variables are set
-if [ -z "$PORT" ]; then
-    echo "Error: PORT environment variable is not set"
-    exit 1
-fi
-
-# Validate PORT is a number
-if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
-    echo "Error: PORT must be a number"
-    exit 1
-fi
+# Set a hardcoded port
+PORT=8000
 
 # Log the port being used
 echo "Starting server on port: $PORT"
@@ -25,6 +16,12 @@ pip install -r requirements.txt --no-cache-dir
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
+
+# Set up environment for Render
+echo "Setting up environment for Render"
+export PYTHONUNBUFFERED=1
+export PYTHONPATH=/opt/render/project/src
+export PORT
 
 # Run the FastAPI app with logging
 exec uvicorn app.main_new:app \
@@ -37,4 +34,5 @@ exec uvicorn app.main_new:app \
     --access-log \
     --proxy-headers \
     --forwarded-allow-ips="*" \
+    --root-path="/" \
     2>&1 | tee logs/app.log
