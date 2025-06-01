@@ -8,9 +8,13 @@ import uuid
 import json
 import logging
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from pydantic import BaseModel, Field
+import uuid
+import time
+import logging
 from pydantic import BaseModel, Field, Json, HttpUrl
 import requests
 from PIL import Image, UnidentifiedImageError
@@ -31,6 +35,33 @@ logger = logging.getLogger(__name__)
 STORY_STORE: Dict[str, dict] = {}
 active_connections: Dict[str, List[WebSocket]] = {}
 
+# Story generation models
+class StoryPart(BaseModel):
+    text: str
+    image_prompt: str
+    image_url: Optional[str] = None
+    image_status: str = "pending"  # pending, processing, completed, failed
+    error: Optional[str] = None
+
+class StoryRequest(BaseModel):
+    child_name: str
+    theme: str = "pirate"
+    face_image: Optional[str] = None
+
+class StoryResponse(BaseModel):
+    story_id: str
+    title: str
+    parts: List[StoryPart]
+    status: str = "text_generated"  # text_generated, generating_images, completed, failed
+    created_at: float = Field(default_factory=time.time)
+    updated_at: float = Field(default_factory=time.time)
+    child_name: str
+    theme: str
+    face_image: Optional[str] = None
+
+# In-memory story store
+STORY_STORE: Dict[str, StoryResponse] = {}
+
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
@@ -49,6 +80,20 @@ if REPLICATE_API_KEY:
 # Frontend URL configuration
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
 is_production = os.getenv('ENVIRONMENT', 'development') == 'production'
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "version": "1.0.0"}
 
 app = FastAPI(title="Kids Story Generator API")
 
@@ -149,6 +194,119 @@ class ConnectionManager:
                     self.active_connections[story_id].remove(conn)
 
 manager = ConnectionManager()
+
+# ================================
+# STORY GENERATION ENDPOINTS
+# ================================
+
+@app.post("/generate-story")
+async def generate_story(
+    request: StoryRequest,
+    background_tasks: BackgroundTasks
+):
+    """Generate story text with Groq API"""
+    story_id = str(uuid.uuid4())
+    
+    try:
+        # Generate story text using Groq
+        story_data = await generate_pirate_story_with_groq(
+            child_name=request.child_name,
+            theme=request.theme
+        )
+        
+        # Create story object
+        story = StoryResponse(
+            story_id=story_id,
+            title=story_data["title"],
+            child_name=request.child_name,
+            theme=request.theme,
+            face_image=request.face_image,
+            parts=[
+                StoryPart(
+                    text=part["text"],
+                    image_prompt=part["image_prompt"]
+                ) for part in story_data["parts"]
+            ]
+        )
+        
+        # Store story
+        STORY_STORE[story_id] = story
+        
+        # Start generating images in background
+        background_tasks.add_task(
+            generate_story_images,
+            story_id=story_id
+        )
+        
+        # Return basic story info without image URLs
+        return {
+            "story_id": story_id,
+            "title": story.title,
+            "status": story.status,
+            "parts": [{"text": p.text, "image_prompt": p.image_prompt} for p in story.parts]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating story: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to generate story")
+
+async def generate_story_images(story_id: str):
+    """Generate images for all parts of a story"""
+    story = STORY_STORE.get(story_id)
+    if not story:
+        return
+    
+    try:
+        story.status = "generating_images"
+        story.updated_at = time.time()
+        
+        for i, part in enumerate(story.parts):
+            try:
+                # Update status
+                part.image_status = "processing"
+                story.updated_at = time.time()
+                
+                # Generate image
+                result = await generate_single_image(
+                    prompt=part.image_prompt,
+                    child_name=story.child_name,
+                    face_image_b64=story.face_image,
+                    theme=story.theme
+                )
+                
+                if "image" in result:
+                    part.image_url = result["image"]
+                    part.image_status = "completed"
+                else:
+                    part.image_status = "failed"
+                    part.error = result.get("error", "Unknown error")
+                
+            except Exception as e:
+                logger.error(f"Error generating image for part {i}: {str(e)}")
+                part.image_status = "failed"
+                part.error = str(e)
+            
+            story.updated_at = time.time()
+            
+        # Update final status
+        if all(p.image_status == "completed" for p in story.parts):
+            story.status = "completed"
+        else:
+            story.status = "completed_with_errors"
+            
+    except Exception as e:
+        logger.error(f"Error in generate_story_images: {str(e)}")
+        story.status = "failed"
+    finally:
+        story.updated_at = time.time()
+
+@app.get("/story/{story_id}")
+async def get_story(story_id: str):
+    """Get the current status of a story"""
+    story = STORY_STORE.get(story_id)
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+    return story
 
 # ================================
 # STORY TEXT GENERATION FUNCTIONS
