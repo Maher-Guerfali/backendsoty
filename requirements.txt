@@ -6,6 +6,9 @@ python-dotenv>=1.0.0
 pydantic>=2.0.0
 httpx>=0.24.1
 
+# Database
+sqlalchemy>=2.0.0
+
 # Image Processing
 Pillow>=10.0.0
 numpy>=1.26.0
@@ -16,11 +19,8 @@ requests>=2.32.3
 aiohttp>=3.9.0
 
 # Utilities
-python-multipart
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
-python-multipart
-python-dotenv
 
 # Async
 anyio>=3.0.0

@@ -12,10 +12,21 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Bac
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from PIL import Image, UnidentifiedImageError
-import replicate
-import requests
-import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
+
+# Import our story service and models
+from app.services.story_service import StoryGenerator
+from app.models.story import Story, StoryPart
+
+# Database configuration
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./stories.db")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -783,24 +794,70 @@ async def generate_story_text_endpoint(request: GenerateStoryRequest):
             status="text_generated",
             created_at=current_time,
             updated_at=current_time
+    except Exception as e:
+        logger.error(f"Error generating story: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def generate_images_background(story_id: str, face_image_url: str, db):
+    """Background task to generate images for a story"""
+    try:
+        # Get story from database
+        db_story = db.query(Story).filter(Story.story_id == story_id).first()
+        if not db_story:
+            return
+            
+        # Get story data
+        story = GeneratedStory(
+            story_id=db_story.story_id,
+            title=db_story.title,
+            parts=[StoryPart(**part) for part in db_story.data.get("parts", [])],
+            status=db_story.status
         )
         
-        # Store in memory
-        STORY_STORE[story_id] = {
-            "story": story_response,
-            "child_name": request.child_name,
-            "theme": request.theme,
-            "total_pages": len(parts),
-            "completed_images": 0
-        }
+        # Generate images
+        story = await story_generator.generate_images(story, face_image_url)
         
-        logger.info(f"Successfully generated story {story_id} with {len(parts)} pages")
-        
-        return story_response.dict()
+        # Update database
+        db_story.status = story.status
+        db_story.updated_at = datetime.now()
+        db_story.data = {"parts": [part.dict() for part in story.parts]}
+        db.commit()
         
     except Exception as e:
-        logger.error(f"Error generating story text: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error generating story: {str(e)}")
+        logger.error(f"Error in background image generation: {str(e)}")
+        db.rollback()
+    finally:
+        db.close()
+
+@app.get("/api/v1/story/{story_id}")
+async def get_story_endpoint(story_id: str):
+    """
+    Get the current status of a story.
+    
+    Args:
+        story_id: ID of the story to retrieve
+    
+    Returns:
+        Current story data with text and image status
+    """
+    try:
+        db = SessionLocal()
+        try:
+            story = db.query(Story).filter(Story.story_id == story_id).first()
+            if not story:
+                raise HTTPException(status_code=404, detail="Story not found")
+                
+            return JSONResponse(story.to_dict())
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Database error: {str(e)}")
+            raise HTTPException(status_code=500, detail="Database error")
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error getting story: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/generate-image")
 async def generate_image_endpoint(request: GenerateImageRequest):
@@ -814,12 +871,12 @@ async def generate_image_endpoint(request: GenerateImageRequest):
         Generated image data or error
     """
     try:
-        logger.info(f"Generating image for story {request.story_id}, page {request.page_number}")
-        
-        # Check if story exists
-        if request.story_id not in STORY_STORE:
-            raise HTTPException(status_code=404, detail="Story not found")
-        
+        db = SessionLocal()
+        try:
+            # Get story from database
+            story = db.query(Story).filter(Story.story_id == request.story_id).first()
+            if not story:
+                raise HTTPException(status_code=404, detail="Story not found")
         story_data = STORY_STORE[request.story_id]
         story = story_data["story"]
         
