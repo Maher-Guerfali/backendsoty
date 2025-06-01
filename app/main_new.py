@@ -33,12 +33,15 @@ origins = [
     "https://*.vercel.app"
 ]
 
+# Add CORS middleware with more explicit headers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["Content-Type", "Authorization"],
+    max_age=86400  # Cache preflight requests for 24 hours
 )
 
 # Include routers
