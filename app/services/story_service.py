@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 STABILITY_API_KEY = os.getenv("STABILITY_API_KEY")
 
+if not GROQ_API_KEY:
+    logger.error("GROQ_API_KEY environment variable is missing")
+    raise ValueError("GROQ_API_KEY environment variable is required")
+
+if not STABILITY_API_KEY:
+    logger.error("STABILITY_API_KEY environment variable is missing")
+    raise ValueError("STABILITY_API_KEY environment variable is required")
+
 class StoryPart(BaseModel):
     part_number: int
     text: str
@@ -40,6 +48,84 @@ class StoryGenerator:
         Generate a 4-part story with image prompts using Groq API
         """
         try:
+            # Validate inputs
+            if not username or not theme:
+                raise ValueError("Username and theme are required")
+
+            # Log the generation attempt
+            logger.info(f"Starting story generation for {username} with theme: {theme}")
+            
+            # Prepare the prompt for Groq
+            prompt = f"""
+            Create a 4-part children's story with the following details:
+            - Main character: {username}
+            - Theme: {theme}
+            
+            For each part, provide:
+            1. A story segment (about 100 words)
+            2. A detailed image prompt that visually represents that part of the story
+            """
+        except ValueError as e:
+            logger.error(f"Invalid input: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Error generating story: {str(e)}")
+            raise
+
+            # Make request to Groq API
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.groq_url,
+                    headers=self.headers,
+                    json={
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.7
+                    }
+                ) as response:
+                    if response.status != 200:
+                        logger.error(f"Groq API error: {response.status}")
+                        raise HTTPException(
+                            status_code=response.status,
+                            detail="Failed to generate story text"
+                        )
+                    
+                    result = await response.json()
+                    story_text = result["choices"][0]["message"]["content"]
+
+            # Parse the response and create story parts
+            story = GeneratedStory(
+                story_id=str(uuid.uuid4()),
+                title=f"{username}'s {theme.capitalize()} Adventure",
+                parts=[],
+                status="text_generated"
+            )
+
+            # Split the story into parts
+            parts = story_text.split("\n\n")
+            for i, part in enumerate(parts):
+                story.parts.append(StoryPart(
+                    part_number=i + 1,
+                    text=part,
+                    image_prompt=f"Create an image for part {i + 1} of the story: {part}",
+                    status="pending"
+                ))
+
+            logger.info(f"Successfully generated story for {username}")
+            return story
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Network error connecting to story generation service"
+            )
+        except Exception as e:
+            logger.error(f"Error generating story: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate story"
+            )
             # Prepare the prompt for Groq
             prompt = f"""
             Create a 4-part children's story with the following details:

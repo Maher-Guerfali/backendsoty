@@ -81,10 +81,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["Content-Type", "Authorization", "X-Requested-With", "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials"],
-    allow_origin_regex="https://.*\.vercel\.app|https://.*\.vercel\.com",
+    allow_origin_regex="https://.*\.vercel\.app|https://.*\.vercel\.com|https://.*\.onrender\.com",
     max_age=86400,  # Cache preflight requests for 24 hours
 )
 
