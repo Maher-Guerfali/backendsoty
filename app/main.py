@@ -82,6 +82,15 @@ if REPLICATE_API_KEY:
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
 is_production = os.getenv('ENVIRONMENT', 'development') == 'production'
 
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL],  # Allow requests from your frontend domain
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
+
 # Initialize FastAPI app
 app = FastAPI(title="Kids Story Generator API")
 

@@ -4,9 +4,58 @@ from typing import Dict, Any
 import uuid
 import asyncio
 import os
+import base64
+import logging
+from datetime import datetime
 
 from app.services.story_service import StoryGenerator, StoryPart, GeneratedStory
 from pydantic import BaseModel
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# In-memory storage for stories (in production, use a database)
+stories: Dict[str, GeneratedStory] = {}
+
+async def generate_story_background(
+    story_id: str,
+    username: str,
+    theme: str,
+    face_image_url: str
+):
+    """
+    Background task to generate story and images
+    """
+    try:
+        logger.info(f"Starting story generation for {username} with theme: {theme}")
+        story_generator = StoryGenerator()
+        story = stories[story_id]
+        
+        # Generate story text
+        logger.info("Generating story text...")
+        generated_story = await story_generator.generate_story(username, theme)
+        
+        # Update story with generated parts
+        story.title = generated_story.title
+        story.parts = generated_story.parts
+        story.status = "text_generated"
+        
+        # Generate images
+        logger.info("Generating images...")
+        await story_generator.generate_images(story, face_image_url)
+        
+        # Final update
+        story.status = "completed"
+        logger.info(f"Story generation completed for {username}")
+        
+    except Exception as e:
+        error_msg = f"Error in background story generation: {str(e)}"
+        logger.error(error_msg)
+        if story_id in stories:
+            stories[story_id].status = "failed"
+            stories[story_id].error = error_msg
+        raise
 
 router = APIRouter()
 
@@ -38,6 +87,29 @@ async def generate_story(
                 }
             )
 
+        # Handle base64 image if provided
+        face_image_data = None
+        if request.face_image_url:
+            # Remove data URL prefix if present
+            if request.face_image_url.startswith('data:'):
+                _, encoded = request.face_image_url.split(',', 1)
+                face_image_data = encoded
+            else:
+                face_image_data = request.face_image_url
+
+            # Validate base64
+            try:
+                base64.b64decode(face_image_data)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": "Invalid base64 image data",
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                )
+
         # Create a unique story ID
         story_id = str(uuid.uuid4())
         
@@ -48,6 +120,25 @@ async def generate_story(
             parts=[],
             status="pending"
         )
+
+        # Store the story
+        stories[story_id] = story
+
+        # Start background task for story generation
+        background_tasks.add_task(
+            generate_story_background,
+            story_id,
+            request.username,
+            request.theme,
+            request.face_image_url
+        )
+
+        return {
+            "story_id": story_id,
+            "status": "pending",
+            "message": "Story generation started",
+            "timestamp": datetime.now().isoformat()
+        }
         
         # Store the story
         stories[story_id] = story
