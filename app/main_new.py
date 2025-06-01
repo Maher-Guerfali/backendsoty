@@ -10,12 +10,13 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uvicorn
 
-# Import routers
-from app.api.endpoints.story import router as story_router
-
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Get PORT from environment variable
+PORT = int(os.getenv('PORT', '8000'))
+logger.info(f"Starting server on port: {PORT}")
 
 # Create FastAPI app
 app = FastAPI(
@@ -25,6 +26,28 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Add health check endpoint
+@app.get("/health")
+async def health_check():
+    try:
+        return {
+            "status": "healthy",
+            "version": "1.0.0",
+            "timestamp": datetime.now().isoformat(),
+            "port": PORT,
+            "environment": os.getenv("ENVIRONMENT", "production")
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
 
 # CORS Configuration
 origins = [

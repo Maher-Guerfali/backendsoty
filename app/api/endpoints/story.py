@@ -100,19 +100,19 @@ async def get_story(story_id: str):
         story_dict["total_parts"] = len(story.parts)
         
         return story_dict
-    if story_id not in stories:
-        raise HTTPException(status_code=404, detail="Story not found")
-    
-    story = stories[story_id]
-    
-    # Convert the story to a dictionary
-    story_dict = story.dict()
-    
-    # Add some additional status information
-    story_dict["completed_parts"] = sum(1 for part in story.parts if part.status == "completed")
-    story_dict["total_parts"] = len(story.parts)
-    
-    return story_dict
+    except HTTPException as e:
+        logger.error(f"HTTP Error getting story {story_id}: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error getting story {story_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Failed to get story",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
 
 @router.websocket("/ws/{story_id}")
 async def websocket_endpoint(websocket: WebSocket, story_id: str):

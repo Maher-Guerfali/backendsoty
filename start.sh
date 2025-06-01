@@ -11,6 +11,15 @@ if [ -z "$PORT" ]; then
     exit 1
 fi
 
+# Validate PORT is a number
+if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+    echo "Error: PORT must be a number"
+    exit 1
+fi
+
+# Log the port being used
+echo "Starting server on port: $PORT"
+
 # Install dependencies with verbose output
 pip install -r requirements.txt --no-cache-dir
 
@@ -25,4 +34,7 @@ exec uvicorn app.main_new:app \
     --log-config uvicorn.json \
     --reload \
     --workers 1 \
+    --access-log \
+    --proxy-headers \
+    --forwarded-allow-ips="*" \
     2>&1 | tee logs/app.log
