@@ -23,4 +23,6 @@ exec uvicorn app.main_new:app \
     --port $PORT \
     --log-level debug \
     --log-config uvicorn.json \
+    --reload \
+    --workers 1 \
     2>&1 | tee logs/app.log
