@@ -81,30 +81,25 @@ if REPLICATE_API_KEY:
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
 is_production = os.getenv('ENVIRONMENT', 'development') == 'production'
 
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Initialize FastAPI app
+app = FastAPI(title="Kids Story Generator API")
 
 # Health check endpoint
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
-app = FastAPI(title="Kids Story Generator API")
-
 # CORS Configuration
 allowed_origins = []
+
+# Add production frontend URL
 if FRONTEND_URL:
     allowed_origins.extend([
         FRONTEND_URL.rstrip('/'),
         f"{FRONTEND_URL.rstrip('/')}/"
     ])
 
+# Add development origins if not in production
 if not is_production:
     development_origins = [
         "http://localhost:3000", "http://localhost:8000", "http://localhost:5173", "http://localhost:5174",
@@ -113,12 +108,16 @@ if not is_production:
     ]
     allowed_origins.extend(development_origins)
 
+# Add Vercel preview URLs
+allowed_origins.append(r'https://.*\.vercel\.app')
+
+# Remove duplicates
 allowed_origins = list(set(allowed_origins))
 
+# Configure CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r'https?://.*\.?vercel\.app/?',
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
