@@ -18,8 +18,8 @@ class StoryRequest(BaseModel):
     theme: str
     face_image_url: str  # Base64 encoded image or URL
 
-@router.post("/generate-story", response_model=Dict[str, Any])
-async def create_story(
+@router.post("/generate-story")
+async def generate_story(
     request: StoryRequest,
     background_tasks: BackgroundTasks
 ):
@@ -28,6 +28,13 @@ async def create_story(
     This will start the generation process in the background.
     """
     try:
+        # Validate inputs
+        if not request.username or not request.theme:
+            raise HTTPException(
+                status_code=400,
+                detail="Username and theme are required"
+            )
+
         # Create a unique story ID
         story_id = str(uuid.uuid4())
         
@@ -51,20 +58,48 @@ async def create_story(
             face_image_url=request.face_image_url
         )
         
+        logger.info(f"Started story generation for {story_id}")
+
         return {
-            "status": "started",
             "story_id": story_id,
-            "message": "Story generation started. Check status using /story/{story_id}"
+            "status": "generating_text",
+            "created_at": datetime.now().isoformat(),
+            "parts": []  # Return empty parts array initially
         }
-        
+
+    except HTTPException as e:
+        logger.error(f"HTTP Error generating story: {str(e)}", exc_info=True)
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error generating story: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Failed to generate story",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
 
 @router.get("/story/{story_id}", response_model=Dict[str, Any])
 async def get_story(story_id: str):
     """
     Get the current status of a story by its ID
     """
+    try:
+        if story_id not in stories:
+            raise HTTPException(status_code=404, detail="Story not found")
+        
+        story = stories[story_id]
+        
+        # Convert the story to a dictionary
+        story_dict = story.dict()
+        
+        # Add some additional status information
+        story_dict["completed_parts"] = sum(1 for part in story.parts if part.status == "completed")
+        story_dict["total_parts"] = len(story.parts)
+        
+        return story_dict
     if story_id not in stories:
         raise HTTPException(status_code=404, detail="Story not found")
     
