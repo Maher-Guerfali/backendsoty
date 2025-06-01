@@ -65,101 +65,105 @@ stories: Dict[str, GeneratedStory] = {}
 class StoryRequest(BaseModel):
     username: str
     theme: str
-    face_image_url: str  # Base64 encoded image or URL
+    face_image_url: Optional[str] = None  # Optional base64 encoded image or URL
 
 @router.post("/generate-story")
 async def generate_story(
-    request: StoryRequest,
+    request: Request,
+    story_request: StoryRequest,
     background_tasks: BackgroundTasks
 ):
     """
     Generate a new story with the given username and theme.
     This will start the generation process in the background.
     """
+    logger.info(f"Received request to generate story: {story_request}")
+    
     try:
+        # Log request details for debugging
+        logger.info(f"Request headers: {dict(request.headers)}")
+        logger.info(f"Request body: {await request.body()}")
+        
         # Validate inputs
-        if not request.username or not request.theme:
+        if not story_request.username or not story_request.theme:
+            error_msg = "Username and theme are required"
+            logger.error(error_msg)
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "message": "Username and theme are required",
+                    "message": error_msg,
                     "timestamp": datetime.now().isoformat()
                 }
             )
 
         # Handle base64 image if provided
         face_image_data = None
-        if request.face_image_url:
-            # Remove data URL prefix if present
-            if request.face_image_url.startswith('data:'):
-                _, encoded = request.face_image_url.split(',', 1)
-                face_image_data = encoded
-            else:
-                face_image_data = request.face_image_url
-
-            # Validate base64
+        if story_request.face_image_url:
+            logger.info("Processing face image from request")
             try:
-                base64.b64decode(face_image_data)
+                # Remove data URL prefix if present
+                if story_request.face_image_url.startswith('data:'):
+                    logger.debug("Extracting base64 from data URL")
+                    _, encoded = story_request.face_image_url.split(',', 1)
+                    face_image_data = encoded
+                else:
+                    logger.debug("Using provided URL directly")
+                    face_image_data = story_request.face_image_url
+
+                # Validate base64
+                if face_image_data.startswith('http'):
+                    logger.info("Face image is a URL, will be processed later")
+                else:
+                    logger.debug("Validating base64 data")
+                    base64.b64decode(face_image_data)
+                    
             except Exception as e:
+                error_msg = f"Invalid image data: {str(e)}"
+                logger.error(error_msg, exc_info=True)
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "message": "Invalid base64 image data",
+                        "message": error_msg,
                         "error": str(e),
                         "timestamp": datetime.now().isoformat()
                     }
                 )
+        else:
+            logger.info("No face image provided, continuing without it")
 
         # Create a unique story ID
         story_id = str(uuid.uuid4())
+        logger.info(f"Generated story ID: {story_id}")
         
-        # Initialize story with pending status
-        story = GeneratedStory(
+        # Initialize story in memory
+        stories[story_id] = GeneratedStory(
             story_id=story_id,
-            title=f"{request.username}'s {request.theme.capitalize()} Adventure",
+            title=f"{story_request.username}'s {story_request.theme.capitalize()} Adventure",
             parts=[],
             status="pending"
         )
-
-        # Store the story
-        stories[story_id] = story
-
-        # Start background task for story generation
+        
+        # Log the background task start
+        logger.info(f"Starting background task for story_id: {story_id}")
+        
+        # Start background task
         background_tasks.add_task(
             generate_story_background,
-            story_id,
-            request.username,
-            request.theme,
-            request.face_image_url
+            story_id=story_id,
+            username=story_request.username,
+            theme=story_request.theme,
+            face_image_url=face_image_data if face_image_data else None
         )
-
-        return {
+        
+        # Return initial response
+        response = {
+            "status": "started",
             "story_id": story_id,
-            "status": "pending",
             "message": "Story generation started",
             "timestamp": datetime.now().isoformat()
         }
-        
-        # Store the story
-        stories[story_id] = story
-        
-        # Start the generation process in the background
-        background_tasks.add_task(
-            generate_story_task,
-            story_id=story_id,
-            username=request.username,
-            theme=request.theme,
-            face_image_url=request.face_image_url
-        )
-        
-        logger.info(f"Started story generation for {story_id}")
-
-        return {
-            "story_id": story_id,
-            "status": "generating_text",
-            "created_at": datetime.now().isoformat(),
-            "parts": []  # Return empty parts array initially
-        }
+        logger.info(f"Returning response: {response}")
+        return response
 
     except HTTPException as e:
         logger.error(f"HTTP Error generating story: {str(e)}", exc_info=True)

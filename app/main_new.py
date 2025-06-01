@@ -61,9 +61,6 @@ async def health_check():
             }
         )
 
-# Include routers
-app.include_router(story_router, prefix="/api/v1", tags=["stories"])
-
 # CORS Configuration
 origins = [
     "http://localhost:3000",
@@ -88,7 +85,7 @@ app.add_middleware(
     max_age=86400,  # Cache preflight requests for 24 hours
 )
 
-# Include routers
+# Include router after CORS is configured
 app.include_router(story_router, prefix="/api/v1", tags=["stories"])
 
 # Health check endpoint
