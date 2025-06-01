@@ -13,3 +13,14 @@ numpy>=1.26.0
 # API Clients
 replicate>=1.0.0
 requests>=2.32.3
+aiohttp>=3.9.0
+
+# Utilities
+python-multipart
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart
+python-dotenv
+
+# Async
+anyio>=3.0.0
