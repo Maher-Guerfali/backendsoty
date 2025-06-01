@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, WebSocket
 from fastapi.responses import JSONResponse
 from typing import Dict, Any
 import uuid
@@ -84,37 +84,52 @@ async def websocket_endpoint(websocket: WebSocket, story_id: str):
     """
     WebSocket endpoint for real-time story updates
     """
-    await websocket.accept()
     try:
+        await websocket.accept()
+        logger.info(f"WebSocket connection established for story {story_id}")
+        
         while True:
-            # Get the current story status
-            if story_id not in stories:
-                await websocket.close()
+            try:
+                # Get the current story status
+                if story_id not in stories:
+                    logger.warning(f"Story {story_id} not found in WebSocket connection")
+                    await websocket.close()
+                    break
+                
+                story = stories[story_id]
+                
+                # Send the current story status
+                await websocket.send_json({
+                    "story_id": story_id,
+                    "status": story.status,
+                    "parts": [
+                        {
+                            "text": part.text,
+                            "image_prompt": part.image_prompt,
+                            "image_url": part.image_url,
+                            "image_status": part.status,
+                            "error": part.error
+                        }
+                        for part in story.parts
+                    ]
+                })
+                logger.debug(f"Sent update for story {story_id}")
+                
+                # Wait for changes or close
+                await asyncio.sleep(1)
+                
+            except asyncio.CancelledError:
+                logger.info(f"WebSocket connection cancelled for story {story_id}")
                 break
-            
-            story = stories[story_id]
-            
-            # Send the current story status
-            await websocket.send_json({
-                "story_id": story_id,
-                "status": story.status,
-                "parts": [
-                    {
-                        "text": part.text,
-                        "image_prompt": part.image_prompt,
-                        "image_url": part.image_url,
-                        "image_status": part.status,
-                        "error": part.error
-                    }
-                    for part in story.parts
-                ]
-            })
-            
-            # Wait for changes or close
-            await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in WebSocket loop for story {story_id}: {str(e)}")
+                break
+                
     except Exception as e:
-        logger.error(f"WebSocket error for story {story_id}: {str(e)}")
+        logger.error(f"WebSocket connection error for story {story_id}: {str(e)}", exc_info=True)
+    finally:
         await websocket.close()
+        logger.info(f"WebSocket connection closed for story {story_id}")
 
 async def generate_story_task(
     story_id: str,

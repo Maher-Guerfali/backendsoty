@@ -55,9 +55,14 @@ async def health_check():
 # Error handling
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.error(f"HTTP Exception: {exc.detail}", exc_info=True)
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.detail},
+        content={
+            "detail": exc.detail,
+            "status_code": exc.status_code,
+            "timestamp": datetime.now().isoformat()
+        },
     )
 
 @app.exception_handler(Exception)
@@ -65,8 +70,42 @@ async def general_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error"},
+        content={
+            "detail": "Internal server error",
+            "error": str(exc),
+            "timestamp": datetime.now().isoformat(),
+            "request": {
+                "method": request.method,
+                "path": request.url.path,
+                "headers": dict(request.headers)
+            }
+        },
     )
+
+# Add middleware for logging requests
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    
+    try:
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        
+        logger.info(
+            f"Request: {request.method} {request.url.path} - "
+            f"Status: {response.status_code} - "
+            f"Time: {process_time:.2f}s"
+        )
+        
+        return response
+        
+    except Exception as e:
+        logger.error(
+            f"Request failed: {request.method} {request.url.path} - "
+            f"Error: {str(e)}",
+            exc_info=True
+        )
+        raise
 
 if __name__ == "__main__":
     uvicorn.run(
