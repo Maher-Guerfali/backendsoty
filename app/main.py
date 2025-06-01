@@ -6,6 +6,8 @@ import logging
 import time
 import tempfile
 import asyncio
+import json
+import uuid
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -196,10 +198,19 @@ async def generate_story(
     
     try:
         # Generate story text using Groq
-        story_data = await generate_pirate_story_with_groq(
+        story_data = generate_story_with_groq(
             child_name=request.child_name,
             theme=request.theme
         )
+        
+        if not story_data:
+            logger.error("Failed to generate story with Groq, using fallback story")
+            story_data = create_fallback_story(
+                child_name=request.child_name,
+                theme=request.theme
+            )
+            
+        logger.info(f"Generated story with {len(story_data.get('pages', []))} pages")
         
         # Create story object
         story = StoryResponse(
