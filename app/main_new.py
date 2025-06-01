@@ -30,7 +30,12 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Add health check endpoint
+# Add root health check endpoint
+@app.get("/")
+async def root():
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+# Add detailed health check endpoint
 @app.get("/health")
 async def health_check():
     try:
@@ -39,7 +44,11 @@ async def health_check():
             "version": "1.0.0",
             "timestamp": datetime.now().isoformat(),
             "port": PORT,
-            "environment": os.getenv("ENVIRONMENT", "production")
+            "environment": os.getenv("ENVIRONMENT", "production"),
+            "dependencies": {
+                "groq_api_key": bool(os.getenv("GROQ_API_KEY")),
+                "stability_api_key": bool(os.getenv("STABILITY_API_KEY"))
+            }
         }
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}", exc_info=True)
