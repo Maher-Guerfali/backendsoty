@@ -12,21 +12,11 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Bac
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
-
-# Import our story service and models
+# Import our story service
 from app.services.story_service import StoryGenerator
-from app.models.story import Story, StoryPart
 
-# Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./stories.db")
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Create tables
-Base.metadata.create_all(bind=engine)
+# In-memory storage for stories
+STORIES: Dict[str, Any] = {}
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -82,6 +72,9 @@ if REPLICATE_API_KEY:
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
 is_production = os.getenv('ENVIRONMENT', 'development') == 'production'
 
+# Initialize FastAPI app
+app = FastAPI(title="Kids Story Generator API")
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -90,9 +83,6 @@ app.add_middleware(
     allow_methods=["*"],  # Allow all HTTP methods
     allow_headers=["*"],  # Allow all headers
 )
-
-# Initialize FastAPI app
-app = FastAPI(title="Kids Story Generator API")
 
 # Health check endpoint
 @app.get("/health")
