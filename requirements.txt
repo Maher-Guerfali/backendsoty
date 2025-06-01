@@ -3,23 +3,13 @@ fastapi>=0.104.1
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 python-dotenv>=1.0.0
-pydantic>=2.0.0  # Updated to pydantic v2 for Python 3.13 compatibility
+pydantic>=2.0.0
 httpx>=0.24.1
 
 # Image Processing
 Pillow>=10.0.0
-opencv-python-headless>=4.8.0.76
-numpy>=1.26.0  # Updated to a version that supports Python 3.13
+numpy>=1.26.0
 
-# AI Services
-replicate==0.25.1
-requests==2.31.0
-grpcio>=1.62.0  # Updated to a version with pre-built wheels
-grpcio-tools>=1.62.0  # Updated to a version with pre-built wheels
-stability-sdk==0.8.6
-protobuf>=4.21.6,<5.0.0  # Updated to be compatible with grpcio-tools
-
-# Required for stability-sdk
-google-api-python-client==2.108.0
-google-auth-httplib2==0.1.1
-google-auth-oauthlib==1.1.0
+# API Clients
+replicate>=1.0.0
+requests>=2.32.3

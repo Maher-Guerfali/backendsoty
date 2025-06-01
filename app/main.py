@@ -2,29 +2,17 @@ from typing import List, Optional, Dict, Any, Union
 import base64
 import io
 import os
-import sys
-import traceback
-import uuid
-import json
 import logging
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
-from typing import Dict, List, Optional, Union
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
-from pydantic import BaseModel, Field
-import uuid
 import time
-import logging
-from pydantic import BaseModel, Field, Json, HttpUrl
-import requests
-from PIL import Image, UnidentifiedImageError
-from io import BytesIO
-import asyncio
-import replicate
-import time
-import httpx
-import json
 import tempfile
+import asyncio
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from PIL import Image, UnidentifiedImageError
+import replicate
+import requests
 import numpy as np
 
 # Set up logging
@@ -905,3 +893,10 @@ async def generate_image_endpoint(request: GenerateImageRequest):
     except Exception as e:
         logger.error(f"Error in generate_image_endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating image: {str(e)}")
+
+
+# Add this at the end of the file
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
