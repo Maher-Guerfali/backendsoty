@@ -79,6 +79,43 @@ async def get_story(story_id: str):
     
     return story_dict
 
+@router.websocket("/ws/{story_id}")
+async def websocket_endpoint(websocket: WebSocket, story_id: str):
+    """
+    WebSocket endpoint for real-time story updates
+    """
+    await websocket.accept()
+    try:
+        while True:
+            # Get the current story status
+            if story_id not in stories:
+                await websocket.close()
+                break
+            
+            story = stories[story_id]
+            
+            # Send the current story status
+            await websocket.send_json({
+                "story_id": story_id,
+                "status": story.status,
+                "parts": [
+                    {
+                        "text": part.text,
+                        "image_prompt": part.image_prompt,
+                        "image_url": part.image_url,
+                        "image_status": part.status,
+                        "error": part.error
+                    }
+                    for part in story.parts
+                ]
+            })
+            
+            # Wait for changes or close
+            await asyncio.sleep(1)
+    except Exception as e:
+        logger.error(f"WebSocket error for story {story_id}: {str(e)}")
+        await websocket.close()
+
 async def generate_story_task(
     story_id: str,
     username: str,
