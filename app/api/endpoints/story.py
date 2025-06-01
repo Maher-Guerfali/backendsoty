@@ -32,7 +32,10 @@ async def generate_story(
         if not request.username or not request.theme:
             raise HTTPException(
                 status_code=400,
-                detail="Username and theme are required"
+                detail={
+                    "message": "Username and theme are required",
+                    "timestamp": datetime.now().isoformat()
+                }
             )
 
         # Create a unique story ID
@@ -69,7 +72,13 @@ async def generate_story(
 
     except HTTPException as e:
         logger.error(f"HTTP Error generating story: {str(e)}", exc_info=True)
-        raise
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={
+                "message": str(e.detail),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
     except Exception as e:
         logger.error(f"Error generating story: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -77,7 +86,8 @@ async def generate_story(
             detail={
                 "message": "Failed to generate story",
                 "error": str(e),
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "type": type(e).__name__
             }
         )
 

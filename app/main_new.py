@@ -59,23 +59,22 @@ app.include_router(story_router, prefix="/api/v1", tags=["stories"])
 origins = [
     "http://localhost:3000",
     "http://localhost:8000",
-    "http://localhost:5173",
+    "https://localhost:3000",
+    "https://localhost:8000",
     "https://mystoria-alpha.vercel.app",
     "https://*.vercel.app",
-    "http://localhost:*",  # Allow any localhost port
-    "https://*.localhost"  # Allow HTTPS localhost
+    "https://*.vercel.com",
 ]
 
-# Add CORS middleware with more explicit headers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
-    expose_headers=["Content-Type", "Authorization", "X-Requested-With", "Access-Control-Allow-Origin"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Type", "Authorization", "X-Requested-With", "Access-Control-Allow-Origin", "Access-Control-Allow-Credentials"],
+    allow_origin_regex="https://.*\.vercel\.app|https://.*\.vercel\.com",
     max_age=86400,  # Cache preflight requests for 24 hours
-    allow_origin_regex="https://.*\.vercel\.app"  # Allow any subdomain of vercel.app
 )
 
 # Include routers
