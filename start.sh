@@ -5,8 +5,8 @@ set -e
 # Enable script debugging
 set -x
 
-# Set a hardcoded port
-PORT=8000
+# Use Render's PORT environment variable
+PORT=${PORT:-8000}
 
 # Log the port being used
 echo "Starting server on port: $PORT"
@@ -20,7 +20,7 @@ mkdir -p logs
 # Set up environment for Render
 echo "Setting up environment for Render"
 export PYTHONUNBUFFERED=1
-export PYTHONPATH=/opt/render/project/src
+export PYTHONPATH=/opt/render/project/src:/app
 export PORT
 
 # Run the FastAPI app with logging
@@ -29,7 +29,6 @@ exec uvicorn app.main_new:app \
     --port $PORT \
     --log-level debug \
     --log-config uvicorn.json \
-    --reload \
     --workers 1 \
     --access-log \
     --proxy-headers \

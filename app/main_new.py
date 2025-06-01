@@ -73,6 +73,8 @@ origins = [
     "https://mystoria-alpha.vercel.app",
     "https://*.vercel.app",
     "https://*.vercel.com",
+    "https://storiabackend.onrender.com",
+    "https://*.onrender.com",
 ]
 
 app.add_middleware(
