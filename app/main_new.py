@@ -47,7 +47,7 @@ async def health_check():
             "environment": os.getenv("ENVIRONMENT", "production"),
             "dependencies": {
                 "groq_api_key": bool(os.getenv("GROQ_API_KEY")),
-                "stability_api_key": bool(os.getenv("STABILITY_API_KEY"))
+                "gemini_api_key": bool(os.getenv("GEMINI_API_KEY"))
             }
         }
     except Exception as e:

@@ -11,15 +11,15 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-STABILITY_API_KEY = os.getenv("STABILITY_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GROQ_API_KEY:
     logger.error("GROQ_API_KEY environment variable is missing")
     raise ValueError("GROQ_API_KEY environment variable is required")
 
-if not STABILITY_API_KEY:
-    logger.error("STABILITY_API_KEY environment variable is missing")
-    raise ValueError("STABILITY_API_KEY environment variable is required")
+if not GEMINI_API_KEY:
+    logger.error("GEMINI_API_KEY environment variable is missing")
+    raise ValueError("GEMINI_API_KEY environment variable is required")
 
 class StoryPart(BaseModel):
     part_number: int
@@ -37,7 +37,7 @@ class GeneratedStory(BaseModel):
 class StoryGenerator:
     def __init__(self):
         self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
-        self.stability_url = "https://stablediffusionapi.com/api/v3/img2img"
+        self.gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {GROQ_API_KEY}"

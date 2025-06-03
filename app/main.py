@@ -1,8 +1,9 @@
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, Literal
 import base64
 import io
 import os
 import logging
+import google.generativeai as genai
 import time
 import tempfile
 import asyncio
@@ -12,6 +13,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Bac
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional, Union
 # Import our story service
 from app.services.story_service import StoryGenerator
 
@@ -60,13 +62,11 @@ load_dotenv()
 # API Configuration
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-STABILITY_API_KEY = os.getenv('STABILITY_API_KEY')
-STABILITY_API_HOST = 'https://api.stability.ai'
-REPLICATE_API_KEY = os.getenv('REPLICATE_API_KEY')
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Configure Replicate
-if REPLICATE_API_KEY:
-    os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_KEY
+# Initialize Gemini client
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # Frontend URL configuration
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://mystoria-alpha.vercel.app')
@@ -198,12 +198,32 @@ manager = ConnectionManager()
 # STORY GENERATION ENDPOINTS
 # ================================
 
+class StoryData(BaseModel):
+    """In-memory story data structure"""
+    story: StoryResponse
+    child_name: str
+    theme: str
+    face_image: Optional[str] = None
+    status: str = "text_generated"
+    created_at: float = Field(default_factory=time.time)
+    updated_at: float = Field(default_factory=time.time)
+    total_pages: int
+    completed_images: int = 0
+
 @app.post("/generate-story")
 async def generate_story(
     request: StoryRequest,
     background_tasks: BackgroundTasks
 ):
-    """Generate story text with Groq API"""
+    """
+    Generate a new story with the given child name and theme.
+    
+    Args:
+        request: Contains child_name and theme
+        
+    Returns:
+        Basic story information with story_id and text
+    """
     story_id = str(uuid.uuid4())
     
     try:
@@ -220,43 +240,61 @@ async def generate_story(
                 theme=request.theme
             )
             
-        logger.info(f"Generated story with {len(story_data.get('pages', []))} pages")
+        logger.info(f"Generated story with {len(story_data.get('parts', []))} pages")
         
-        # Create story object
+        # Create story parts
+        parts = [
+            StoryPart(
+                text=part["text"],
+                image_prompt=part["image_prompt"],
+                image_status="pending"
+            ) for part in story_data["parts"]
+        ]
+        
+        # Create story response
         story = StoryResponse(
             story_id=story_id,
             title=story_data["title"],
             child_name=request.child_name,
             theme=request.theme,
-            face_image=request.face_image,
-            parts=[
-                StoryPart(
-                    text=part["text"],
-                    image_prompt=part["image_prompt"]
-                ) for part in story_data["parts"]
-            ]
+            parts=parts,
+            status="text_generated"
         )
         
-        # Store story
-        STORY_STORE[story_id] = story
+        # Store in memory
+        STORY_STORE[story_id] = {
+            "story": story,
+            "child_name": request.child_name,
+            "theme": request.theme,
+            "face_image": request.face_image,
+            "status": "text_generated",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "total_pages": len(parts),
+            "completed_images": 0
+        }
         
-        # Start generating images in background
-        background_tasks.add_task(
-            generate_story_images,
-            story_id=story_id
-        )
+        # Start generating images in background if face image is provided
+        if request.face_image:
+            background_tasks.add_task(
+                generate_images_background,
+                story_id=story_id,
+                face_image_url=request.face_image
+            )
         
         # Return basic story info without image URLs
         return {
             "story_id": story_id,
             "title": story.title,
-            "status": story.status,
+            "status": "text_generated",
+            "total_pages": len(parts),
+            "completed_images": 0,
             "parts": [{"text": p.text, "image_prompt": p.image_prompt} for p in story.parts]
         }
         
     except Exception as e:
-        logger.error(f"Error generating story: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to generate story")
+        logger.error(f"Error generating story: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def generate_story_images(story_id: str):
     """Generate images for all parts of a story"""
@@ -499,111 +537,8 @@ def create_enhanced_image_prompt(base_prompt: str, child_name: str, theme: str =
     
     return style_prompt.strip()
 
-async def generate_image_with_stability_ai(
-    prompt: str, 
-    child_name: str, 
-    face_image_b64: str,
-    theme: str = "pirate",
-    strength: float = 0.7,
-    width: int = 1024,
-    height: int = 1024
-) -> Dict[str, Any]:
-    """
-    Generate image using Stability AI with image-to-image transformation.
-    
-    Args:
-        prompt: Text prompt for image generation
-        child_name: Name of the child character
-        face_image_b64: Base64-encoded face image
-        theme: Theme of the story
-        strength: Transformation strength (0.0 to 1.0)
-        width: Output image width
-        height: Output image height
-    Returns:
-        Dictionary with 'image' (base64) or 'error' key
-    """
-    if not STABILITY_API_KEY:
-        return {"error": "Stability API key not configured"}
-    
-    enhanced_prompt = create_enhanced_image_prompt(prompt, child_name, theme)
-    logger.info(f"Generating image with Stability AI for {child_name}")
-    
-    try:
-        headers = {
-            "Authorization": f"Bearer {STABILITY_API_KEY}",
-            "Accept": "application/json"
-        }
-        
-        # Prepare the request data
-        data = {
-            "prompt": enhanced_prompt,
-            "output_format": "png",
-            "width": width,
-            "height": height,
-            "samples": 1,
-            "steps": 30,
-            "strength": strength,
-            "mode": "image-to-image"
-        }
-        
-        # Process the face image
-        try:
-            # Remove data URL prefix if present
-            if "," in face_image_b64:
-                face_image_b64 = face_image_b64.split(",")[1]
-                
-            # Convert base64 to bytes
-            image_data = base64.b64decode(face_image_b64)
-            
-            # Create a temporary file for the image
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
-                temp_file.write(image_data)
-                temp_path = temp_file.name
-            
-            try:
-                # Open and process the image
-                with Image.open(temp_path) as img:
-                    img = img.convert("RGB")
-                    img_io = io.BytesIO()
-                    img.save(img_io, format='PNG')
-                    img_io.seek(0)
-                    
-                    files = {
-                        "image": ("input.png", img_io, "image/png"),
-                        "none": ''
-                    }
-                    
-                    # Make the API request
-                    response = requests.post(
-                        f"{STABILITY_API_HOST}/v2beta/stable-image/generate/sd3",
-                        headers=headers,
-                        files=files,
-                        data=data,
-                        timeout=60
-                    )
-            finally:
-                # Clean up temp file
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-                    
-        except Exception as e:
-            return {"error": f"Error processing face image: {str(e)}"}
-        
-        # Check response
-        if response.status_code != 200:
-            return {"error": f"Stability API error: {response.status_code} - {response.text}"}
-        
-        # Return the generated image as base64
-        image_base64 = base64.b64encode(response.content).decode('utf-8')
-        return {"image": f"data:image/png;base64,{image_base64}", "source": "stability-ai"}
-        
-    except Exception as e:
-        logger.error(f"Stability AI error: {str(e)}")
-        return {"error": f"Stability AI error: {str(e)}"}
 
-async def generate_image_with_replicate(
+async def generate_image_with_gemini(
     prompt: str, 
     child_name: str, 
     face_image_b64: str,
@@ -613,7 +548,7 @@ async def generate_image_with_replicate(
     height: int = 1024
 ) -> Dict[str, Any]:
     """
-    Generate image using Replicate with image-to-image transformation.
+    Generate image using Google Gemini with image-to-image transformation.
     
     Args:
         prompt: Text prompt for image generation
@@ -627,71 +562,47 @@ async def generate_image_with_replicate(
     Returns:
         Dictionary with 'image' (base64) or 'error' key
     """
-    if not REPLICATE_API_KEY:
-        return {"error": "Replicate API key not configured"}
+    if not GEMINI_API_KEY:
+        return {"error": "Gemini API key not configured"}
         
     enhanced_prompt = create_enhanced_image_prompt(prompt, child_name, theme)
-    logger.info(f"Generating image with Replicate for {child_name}")
+    logger.info(f"Generating image with Gemini for {child_name}")
     
-    temp_path = None
     try:
-        # Save face image to temporary file
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
-            # Remove data URL prefix if present
-            image_data = base64.b64decode(face_image_b64.split(",")[-1])
-            temp_file.write(image_data)
-            temp_path = temp_file.name
+        # Process the face image
+        if "," in face_image_b64:
+            face_image_b64 = face_image_b64.split(",")[1]
+            
+        image_data = base64.b64decode(face_image_b64)
+        image = genai.upload_file(
+            data=image_data,
+            mime_type="image/png",
+            name=f"{child_name}_{int(time.time())}.png"
+        )
         
-        try:
-            # Process the image
-            with Image.open(temp_path) as img:
-                img = img.convert("RGB")
-                img.save(temp_path, "PNG")
+        # Generate the image
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        response = model.generate_content([
+            enhanced_prompt,
+            "Here is the reference face image for the character:",
+            image
+        ], generation_config={
+            "response_mime_type": "image/png",
+            "dimensions": {"width": width, "height": height}
+        })
+        
+        # Get the generated image
+        if not response.candidates or not response.candidates[0].content.parts:
+            return {"error": "No image was generated by Gemini"}
             
-            # Prepare input parameters for SDXL
-            input_params = {
-                "prompt": enhanced_prompt,
-                "image": open(temp_path, "rb"),
-                "width": width,
-                "height": height,
-                "num_outputs": 1,
-                "num_inference_steps": 50,
-                "guidance_scale": 7.5,
-                "prompt_strength": strength,
-                "scheduler": "K_EULER",
-                "negative_prompt": "blurry, low quality, distorted, disfigured, extra limbs, extra fingers, cropped, out of frame, watermark, signature, text, scary, dark, frightening"
-            }
-            
-            # Call Replicate API
-            output = await asyncio.to_thread(
-                replicate.run,
-                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-                input=input_params
-            )
-            
-            if not output or not isinstance(output, list) or not output[0]:
-                return {"error": "Unexpected output format from Replicate"}
-            
-            # Download the generated image
-            response = requests.get(output[0])
-            if response.status_code != 200:
-                return {"error": f"Failed to download generated image: {response.status_code}"}
-            
-            # Convert to base64
-            image_base64 = base64.b64encode(response.content).decode("utf-8")
-            return {"image": f"data:image/png;base64,{image_base64}", "source": "replicate"}
-            
-        finally:
-            # Clean up temp file
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-                    
+        generated_image = response.candidates[0].content.parts[0].inline_data.data
+        image_base64 = base64.b64encode(generated_image).decode('utf-8')
+        return {"image": f"data:image/png;base64,{image_base64}", "source": "gemini"}
+        
     except Exception as e:
-        logger.error(f"Replicate error: {str(e)}")
-        return {"error": f"Replicate error: {str(e)}"}
+        error_msg = str(e)
+        logger.error(f"Gemini API error: {error_msg}")
+        return {"error": f"Gemini API error: {error_msg}"}
 
 async def generate_single_image(
     prompt: str, 
@@ -700,50 +611,84 @@ async def generate_single_image(
     theme: str = "pirate",
     strength: float = 0.7,
     width: int = 1024,
-    height: int = 1024
+    height: int = 1024,
+    preferred_provider: str = "gemini"
 ) -> Dict[str, Any]:
     """
-    Generate a single image using available services (Stability AI first, then Replicate).
+    Generate a single image using Google Gemini.
     
     Args:
         prompt: Text prompt for image generation
         child_name: Name of the child character
         face_image_b64: Base64-encoded face image
         theme: Theme of the story
-        strength: Transformation strength (0.0 to 1.0)
         width: Output image width
         height: Output image height
     
     Returns:
         Dictionary with 'image' (base64), 'source', or 'error' key
     """
-    logger.info(f"Starting image generation for {child_name}")
+    if not GEMINI_API_KEY:
+        return {"error": "Gemini API key not configured"}
+        
+    logger.info("Generating image with Gemini...")
+    result = await generate_image_with_gemini(
+        prompt, child_name, face_image_b64, theme, strength, width, height
+    )
     
-    # Try Stability AI first
-    if STABILITY_API_KEY:
-        logger.info("Trying Stability AI...")
-        result = await generate_image_with_stability_ai(
-            prompt, child_name, face_image_b64, theme, strength, width, height
-        )
-        if "image" in result:
-            logger.info("Successfully generated image with Stability AI")
-            return result
+    if "image" in result:
+        logger.info("Successfully generated image with Gemini")
+        return result
+    
+    logger.error(f"Gemini image generation failed: {result.get('error', 'Unknown error')}")
+    return result
+
+class TestImageRequest(BaseModel):
+    base64_image: str  # Base64 encoded image
+    prompt: str
+
+@app.post("/api/test-image")
+async def test_image_generation(request: TestImageRequest):
+    """
+    Test endpoint for image generation with Gemini.
+    
+    Args:
+        request: Contains base64_image and prompt
+        
+    Returns:
+        Generated image in base64 format or error message
+    """
+    try:
+        # Process the base64 image
+        if "," in request.base64_image:
+            image_data = request.base64_image.split(",")[1]
         else:
-            logger.warning(f"Stability AI failed: {result.get('error', 'Unknown error')}")
-    
-    # Fallback to Replicate
-    if REPLICATE_API_KEY:
-        logger.info("Trying Replicate as fallback...")
-        result = await generate_image_with_replicate(
-            prompt, child_name, face_image_b64, theme, strength, width, height
+            image_data = request.base64_image
+            
+        # Generate the image using Gemini
+        result = await generate_single_image(
+            prompt=request.prompt,
+            child_name="test_user",
+            face_image_b64=image_data,
+            theme="test",
+            width=1024,
+            height=1024
         )
+        
         if "image" in result:
-            logger.info("Successfully generated image with Replicate")
-            return result
+            return {"image": result["image"]}
         else:
-            logger.warning(f"Replicate failed: {result.get('error', 'Unknown error')}")
-    
-    return {"error": "All image generation services failed"}
+            return JSONResponse(
+                status_code=400,
+                content={"error": result.get("error", "Failed to generate image")}
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in test_image_generation: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Internal server error: {str(e)}"}
+        )
 
 # ================================
 # API ENDPOINTS
@@ -797,41 +742,122 @@ async def generate_story_text_endpoint(request: GenerateStoryRequest):
         logger.error(f"Error generating story: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def generate_images_background(story_id: str, face_image_url: str, db):
-    """Background task to generate images for a story"""
+async def generate_images_background(story_id: str, face_image_url: str):
+    """
+    Background task to generate images for a story using the provided face image.
+    
+    Args:
+        story_id: ID of the story to generate images for
+        face_image_url: Base64-encoded face image to use for image generation
+    """
     try:
-        # Get story from database
-        db_story = db.query(Story).filter(Story.story_id == story_id).first()
-        if not db_story:
+        # Get story from memory store
+        story_data = STORY_STORE.get(story_id)
+        if not story_data:
+            logger.error(f"Story {story_id} not found in memory store")
             return
             
-        # Get story data
-        story = GeneratedStory(
-            story_id=db_story.story_id,
-            title=db_story.title,
-            parts=[StoryPart(**part) for part in db_story.data.get("parts", [])],
-            status=db_story.status
-        )
+        # Update status to show we're generating images
+        story_data["status"] = "generating_images"
+        story_data["updated_at"] = time.time()
         
-        # Generate images
-        story = await story_generator.generate_images(story, face_image_url)
+        # Generate images for each part
+        story = story_data["story"]
+        for i, part in enumerate(story.parts):
+            try:
+                # Skip if already completed
+                if part.image_status == "completed":
+                    story_data["completed_images"] += 1
+                    continue
+                    
+                # Update status
+                part.image_status = "processing"
+                story_data["updated_at"] = time.time()
+                
+                # Broadcast update
+                await manager.broadcast(story_id, {
+                    "type": "image_update",
+                    "page_number": i + 1,
+                    "status": "processing"
+                })
+                
+                # Generate the image
+                result = await generate_single_image(
+                    prompt=part.image_prompt,
+                    child_name=story_data["child_name"],
+                    face_image_b64=face_image_url,
+                    theme=story_data["theme"]
+                )
+                
+                if "image" in result:
+                    # Success - update the story
+                    part.image_url = result["image"]
+                    part.image_status = "completed"
+                    story_data["completed_images"] += 1
+                    
+                    # Broadcast success
+                    await manager.broadcast(story_id, {
+                        "type": "image_update",
+                        "page_number": i + 1,
+                        "status": "completed",
+                        "image_url": result["image"],
+                        "story_completed": story_data["completed_images"] >= story_data["total_pages"]
+                    })
+                    
+                    logger.info(f"Successfully generated image for page {i+1}")
+                else:
+                    # Failed - update status
+                    error_msg = result.get("error", "Unknown error")
+                    part.image_status = "failed"
+                    part.error = error_msg
+                    
+                    # Broadcast failure
+                    await manager.broadcast(story_id, {
+                        "type": "image_update",
+                        "page_number": i + 1,
+                        "status": "failed",
+                        "error": error_msg
+                    })
+                    
+                    logger.error(f"Failed to generate image for page {i+1}: {error_msg}")
+                
+            except Exception as e:
+                logger.error(f"Error generating image for page {i+1}: {str(e)}", exc_info=True)
+                part.image_status = "failed"
+                part.error = str(e)
+                
+                # Broadcast error
+                await manager.broadcast(story_id, {
+                    "type": "image_update",
+                    "page_number": i + 1,
+                    "status": "failed",
+                    "error": str(e)
+                })
+            
+            # Update timestamp
+            story_data["updated_at"] = time.time()
         
-        # Update database
-        db_story.status = story.status
-        db_story.updated_at = datetime.now()
-        db_story.data = {"parts": [part.dict() for part in story.parts]}
-        db.commit()
+        # Update final status
+        if story_data["completed_images"] >= story_data["total_pages"]:
+            story_data["status"] = "completed"
+        else:
+            story_data["status"] = "partially_completed"
+            
+        story_data["updated_at"] = time.time()
+        
+        logger.info(f"Completed image generation for story {story_id}")
         
     except Exception as e:
-        logger.error(f"Error in background image generation: {str(e)}")
-        db.rollback()
-    finally:
-        db.close()
+        logger.error(f"Error in background image generation: {str(e)}", exc_info=True)
+        # Update status to failed
+        if story_id in STORY_STORE:
+            STORY_STORE[story_id]["status"] = "failed"
+            STORY_STORE[story_id]["updated_at"] = time.time()
 
 @app.get("/api/v1/story/{story_id}")
 async def get_story_endpoint(story_id: str):
     """
-    Get the current status of a story.
+    Get the current status of a story from in-memory storage.
     
     Args:
         story_id: ID of the story to retrieve
@@ -840,18 +866,33 @@ async def get_story_endpoint(story_id: str):
         Current story data with text and image status
     """
     try:
-        db = SessionLocal()
-        try:
-            story = db.query(Story).filter(Story.story_id == story_id).first()
-            if not story:
-                raise HTTPException(status_code=404, detail="Story not found")
-            
-            return JSONResponse(story.to_dict())
-        except SQLAlchemyError as e:
-            logger.error(f"Database error: {str(e)}")
-            raise HTTPException(status_code=500, detail="Database error")
-        finally:
-            db.close()
+        story_data = STORY_STORE.get(story_id)
+        if not story_data:
+            raise HTTPException(status_code=404, detail="Story not found")
+        
+        # Convert the story data to a response model
+        response_data = {
+            "story_id": story_id,
+            "title": story_data["story"].title,
+            "parts": [
+                {
+                    "page_number": i + 1,
+                    "text": part.text,
+                    "image_prompt": part.image_prompt,
+                    "image_url": part.image_url,
+                    "image_status": part.image_status,
+                    "error": part.error
+                }
+                for i, part in enumerate(story_data["story"].parts)
+            ],
+            "status": story_data["status"],
+            "created_at": story_data.get("created_at", time.time()),
+            "updated_at": story_data.get("updated_at", time.time()),
+            "child_name": story_data["child_name"],
+            "theme": story_data["theme"]
+        }
+        
+        return JSONResponse(content=response_data)
             
     except Exception as e:
         logger.error(f"Error getting story: {str(e)}")
@@ -869,52 +910,76 @@ async def generate_image_endpoint(request: GenerateImageRequest):
         Generated image data or error
     """
     try:
-        db = SessionLocal()
+        # Validate face image format
         try:
-            # Get story from database
-            story = db.query(Story).filter(Story.story_id == request.story_id).first()
-            if not story:
-                raise HTTPException(status_code=404, detail="Story not found")
+            if request.user_face_image:
+                # Check if it's a base64 string
+                if not (request.user_face_image.startswith('data:image/') and 'base64,' in request.user_face_image):
+                    raise HTTPException(status_code=400, detail="Invalid face image format. Must be a base64 data URL.")
+                # Try to decode to verify it's valid base64
+                base64_data = request.user_face_image.split('base64,')[-1]
+                base64.b64decode(base64_data, validate=True)
+        except Exception as e:
+            logger.error(f"Invalid base64 image data: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid face image data")
+
+        # Get story from memory store
+        story_data = STORY_STORE.get(request.story_id)
+        if not story_data or "story" not in story_data:
+            raise HTTPException(status_code=404, detail="Story not found or invalid story data")
             
-            # Get story from memory store
-            story_data = STORY_STORE[request.story_id]
-            story = story_data["story"]
-            
-            # Find the page
+        story = story_data["story"]
+        
+        # Validate required fields in story_data
+        required_fields = ["child_name", "theme", "completed_images", "total_pages"]
+        for field in required_fields:
+            if field not in story_data:
+                logger.error(f"Missing required field in story_data: {field}")
+                raise HTTPException(status_code=500, detail=f"Invalid story data: missing {field}")
+        
+        # Find the page
+        try:
             page_index = request.page_number - 1
             if page_index < 0 or page_index >= len(story.parts):
-                raise HTTPException(status_code=400, detail="Invalid page number")
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Story not found in memory store")
-        except SQLAlchemyError as e:
-            logger.error(f"Database error: {str(e)}")
-            raise HTTPException(status_code=500, detail="Database error")
-        except Exception as e:
-            logger.error(f"Error accessing story data: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
-        finally:
-            db.close()
-        
-        # Update page status to processing
-        story.parts[page_index].image_status = "processing"
-        story.updated_at = time.time()
-        
-        # Broadcast update
-        await manager.broadcast(request.story_id, {
-            "type": "image_update",
-            "page_number": request.page_number,
-            "status": "processing"
-        })
-        
-        # Generate the image
-        result = await generate_single_image(
-            prompt=request.prompt,
-            child_name=story_data["child_name"],
-            face_image_b64=request.user_face_image,
-            theme=story_data["theme"]
-        )
-        
-        if "image" in result:
+                raise HTTPException(status_code=400, detail=f"Invalid page number. Must be between 1 and {len(story.parts)}")
+            
+            # Update page status to processing
+            story.parts[page_index].image_status = "processing"
+            story_data["updated_at"] = time.time()
+            
+            # Broadcast update
+            await manager.broadcast(request.story_id, {
+                "type": "image_update",
+                "page_number": request.page_number,
+                "status": "processing"
+            })
+            
+            # Generate the image with timeout
+            try:
+                result = await asyncio.wait_for(
+                    generate_single_image(
+                        prompt=request.prompt,
+                        child_name=story_data["child_name"],
+                        face_image_b64=request.user_face_image,
+                        theme=story_data["theme"]
+                    ),
+                    timeout=120  # 2 minutes timeout
+                )
+            except asyncio.TimeoutError:
+                error_msg = "Image generation timed out"
+                logger.error(f"{error_msg} for page {request.page_number}")
+                raise HTTPException(status_code=408, detail=error_msg)
+            
+            if not isinstance(result, dict):
+                error_msg = f"Unexpected result type from generate_single_image: {type(result)}"
+                logger.error(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
+                
+            if "image" not in result:
+                error_msg = result.get("error", "Failed to generate image")
+                logger.error(f"Image generation failed: {error_msg}")
+                raise HTTPException(status_code=500, detail=error_msg)
+            
             # Success - update the story
             story.parts[page_index].image_url = result["image"]
             story.parts[page_index].image_status = "completed"
@@ -922,9 +987,9 @@ async def generate_image_endpoint(request: GenerateImageRequest):
             
             # Check if all images are done
             if story_data["completed_images"] >= story_data["total_pages"]:
-                story.status = "completed"
+                story_data["status"] = "completed"
             
-            story.updated_at = time.time()
+            story_data["updated_at"] = time.time()
             
             # Broadcast success
             await manager.broadcast(request.story_id, {
@@ -932,7 +997,7 @@ async def generate_image_endpoint(request: GenerateImageRequest):
                 "page_number": request.page_number,
                 "status": "completed",
                 "image_url": result["image"],
-                "story_completed": story.status == "completed"
+                "story_completed": story_data.get("status") == "completed"
             })
             
             logger.info(f"Successfully generated image for page {request.page_number}")
@@ -943,34 +1008,18 @@ async def generate_image_endpoint(request: GenerateImageRequest):
                 "source": result.get("source", "unknown"),
                 "page_number": request.page_number
             }
-        else:
-            # Failed - update status
-            error_msg = result.get("error", "Unknown error")
-            story.parts[page_index].image_status = "failed"
-            story.parts[page_index].error = error_msg
-            story.updated_at = time.time()
             
-            # Broadcast failure
-            await manager.broadcast(request.story_id, {
-                "type": "image_update",
-                "page_number": request.page_number,
-                "status": "failed",
-                "error": error_msg
-            })
-            
-            logger.error(f"Failed to generate image for page {request.page_number}: {error_msg}")
-            
-            return {
-                "success": False,
-                "error": error_msg,
-                "page_number": request.page_number
-            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error processing page {request.page_number}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Error processing page: {str(e)}")
             
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in generate_image_endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error generating image: {str(e)}")
+        logger.error(f"Unexpected error in generate_image_endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while generating the image")
 
 
 # Add this at the end of the file
