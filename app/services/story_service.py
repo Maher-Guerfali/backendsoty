@@ -1,9 +1,11 @@
 import os
 import json
 import logging
+import uuid
 import aiohttp
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
+from fastapi import HTTPException
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -64,77 +66,6 @@ class StoryGenerator:
             For each part, provide:
             1. A story segment (about 100 words)
             2. A detailed image prompt that visually represents that part of the story
-            """
-        except ValueError as e:
-            logger.error(f"Invalid input: {str(e)}")
-            raise
-        except Exception as e:
-            logger.error(f"Error generating story: {str(e)}")
-            raise
-
-            # Make request to Groq API
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.groq_url,
-                    headers=self.headers,
-                    json={
-                        "model": "gpt-4",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.7
-                    }
-                ) as response:
-                    if response.status != 200:
-                        logger.error(f"Groq API error: {response.status}")
-                        raise HTTPException(
-                            status_code=response.status,
-                            detail="Failed to generate story text"
-                        )
-                    
-                    result = await response.json()
-                    story_text = result["choices"][0]["message"]["content"]
-
-            # Parse the response and create story parts
-            story = GeneratedStory(
-                story_id=str(uuid.uuid4()),
-                title=f"{username}'s {theme.capitalize()} Adventure",
-                parts=[],
-                status="text_generated"
-            )
-
-            # Split the story into parts
-            parts = story_text.split("\n\n")
-            for i, part in enumerate(parts):
-                story.parts.append(StoryPart(
-                    part_number=i + 1,
-                    text=part,
-                    image_prompt=f"Create an image for part {i + 1} of the story: {part}",
-                    status="pending"
-                ))
-
-            logger.info(f"Successfully generated story for {username}")
-            return story
-
-        except aiohttp.ClientError as e:
-            logger.error(f"Network error: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail="Network error connecting to story generation service"
-            )
-        except Exception as e:
-            logger.error(f"Error generating story: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to generate story"
-            )
-            # Prepare the prompt for Groq
-            prompt = f"""
-            Create a 4-part children's story with the following details:
-            - Main character: {username}
-            - Theme: {theme}
-            
-            For each part, provide:
-            1. A story segment (about 100 words)
-            2. A detailed image prompt that visually represents that part of the story
             
             Format the response as a JSON object with this structure:
             {{
@@ -144,8 +75,7 @@ class StoryGenerator:
                         "part_number": 1,
                         "text": "Story text for part 1...",
                         "image_prompt": "Detailed image description for part 1..."
-                    }},
-                    ...
+                    }}
                 ]
             }}
             """
@@ -154,6 +84,76 @@ class StoryGenerator:
             async with aiohttp.ClientSession() as session:
                 data = {
                     "model": "mixtral-8x7b-32768",
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 4000
+                }
+                
+                async with session.post(
+                    self.groq_url, 
+                    headers=self.headers, 
+                    json=data
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Groq API error {response.status}: {error_text}")
+                        raise HTTPException(
+                            status_code=response.status,
+                            detail=f"Failed to generate story text: {error_text}"
+                        )
+                    
+                    result = await response.json()
+                    
+                    if "error" in result:
+                        raise Exception(f"Groq API error: {result['error']}")
+                    
+                    # Extract the JSON from the response
+                    content = result["choices"][0]["message"]["content"]
+                    
+                    # Clean and parse the JSON response
+                    try:
+                        # Sometimes the response might include markdown code blocks
+                        if '```json' in content:
+                            content = content.split('```json')[1].split('```')[0].strip()
+                        elif '```' in content:
+                            content = content.split('```')[1].strip()
+                            if content.startswith('json'):
+                                content = content[4:].strip()
+                        
+                        story_data = json.loads(content)
+                        
+                        # Create the story object
+                        story = GeneratedStory(
+                            story_id=str(uuid.uuid4()),
+                            title=story_data.get("title", f"{username}'s {theme.capitalize()} Adventure"),
+                            parts=[],
+                            status="text_generated"
+                        )
+                        
+                        # Add story parts
+                        for part_data in story_data.get("parts", []):
+                            story.parts.append(StoryPart(
+                                part_number=part_data.get("part_number", 1),
+                                text=part_data.get("text", ""),
+                                image_prompt=part_data.get("image_prompt", ""),
+                                status="pending"
+                            ))
+                        
+                        return story
+                        
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse story JSON: {content}")
+                        raise Exception(f"Failed to parse story JSON: {str(e)}")
+                    
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error: {str(e)}")
+            raise Exception(f"Network error: {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"Error in generate_story: {str(e)}", exc_info=True)
+            raise
                     "messages": [
                         {"role": "user", "content": prompt}
                     ],
