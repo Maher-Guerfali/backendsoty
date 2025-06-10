@@ -112,7 +112,6 @@ class StoryGenerator:
                     # Extract the JSON from the response
                     content = result["choices"][0]["message"]["content"]
                     
-                    # Clean and parse the JSON response
                     try:
                         # Sometimes the response might include markdown code blocks
                         if '```json' in content:
@@ -128,18 +127,17 @@ class StoryGenerator:
                         story = GeneratedStory(
                             story_id=str(uuid.uuid4()),
                             title=story_data.get("title", f"{username}'s {theme.capitalize()} Adventure"),
-                            parts=[],
+                            parts=[
+                                StoryPart(
+                                    part_number=part.get("part_number", idx + 1),
+                                    text=part.get("text", ""),
+                                    image_prompt=part.get("image_prompt", ""),
+                                    status="pending"
+                                )
+                                for idx, part in enumerate(story_data.get("parts", []))
+                            ],
                             status="text_generated"
                         )
-                        
-                        # Add story parts
-                        for part_data in story_data.get("parts", []):
-                            story.parts.append(StoryPart(
-                                part_number=part_data.get("part_number", 1),
-                                text=part_data.get("text", ""),
-                                image_prompt=part_data.get("image_prompt", ""),
-                                status="pending"
-                            ))
                         
                         return story
                         
@@ -151,62 +149,13 @@ class StoryGenerator:
             logger.error(f"Network error: {str(e)}")
             raise Exception(f"Network error: {str(e)}")
             
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Groq response: {e}")
+            logger.error(f"Response content: {content}")
+            raise Exception("Failed to parse story generation response")
+            
         except Exception as e:
             logger.error(f"Error in generate_story: {str(e)}", exc_info=True)
-            raise
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 4000
-                }
-                
-                async with session.post(
-                    self.groq_url, 
-                    headers=self.headers, 
-                    json=data
-                ) as response:
-                    result = await response.json()
-                    
-                    if "error" in result:
-                        raise Exception(f"Groq API error: {result['error']}")
-                    
-                    # Extract the JSON from the response
-                    content = result["choices"][0]["message"]["content"]
-                    
-                    # Clean and parse the JSON response
-                    try:
-                        # Sometimes the response might include markdown code blocks
-                        if '```json' in content:
-                            content = content.split('```json')[1].split('```')[0].strip()
-                        elif '```' in content:
-                            content = content.split('```')[1].split('```')[0].strip()
-                        
-                        story_data = json.loads(content)
-                        
-                        # Create the story object
-                        story = GeneratedStory(
-                            story_id=str(hash(f"{username}_{theme}")),  # Simple ID generation
-                            title=story_data.get("title", f"{username}'s {theme.capitalize()} Adventure"),
-                            parts=[
-                                StoryPart(
-                                    part_number=part["part_number"],
-                                    text=part["text"],
-                                    image_prompt=part["image_prompt"]
-                                )
-                                for part in story_data["parts"]
-                            ]
-                        )
-                        
-                        return story
-                        
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse Groq response: {e}")
-                        logger.error(f"Response content: {content}")
-                        raise Exception("Failed to parse story generation response")
-                        
-        except Exception as e:
-            logger.error(f"Error generating story: {str(e)}")
             raise
     
     async def generate_images(self, story: GeneratedStory, face_image_url: str) -> GeneratedStory:
