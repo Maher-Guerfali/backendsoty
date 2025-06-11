@@ -44,13 +44,12 @@ export ENVIRONMENT=${ENVIRONMENT:-production}
 
 # Start the server
 echo "Starting server..."
-uvicorn app.main:app --host 0.0.0.0 --port $PORT --reload
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/opt/render/project/src:/app
-export PORT
 
 # Run the FastAPI app with logging
-exec uvicorn app.main_new:app \
+exec uvicorn app.main:app \
     --host 0.0.0.0 \
     --port $PORT \
     --log-level debug \
