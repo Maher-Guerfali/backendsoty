@@ -71,7 +71,7 @@ async def health_check():
             "environment": os.getenv("ENVIRONMENT", "production"),
             "dependencies": {
                 "groq_api_key": bool(os.getenv("GROQ_API_KEY")),
-                "gemini_api_key": bool(os.getenv("GEMINI_API_KEY")),
+                "gemini_api_key": bool(os.getenv("AIzaSyAJcXKOOdp3pFfgvLGTU86YiQR3yIhpDdY")),
                 "openai_api_key": bool(os.getenv("OPENAI_API_KEY")),
                 "replicate_api_key": bool(os.getenv("REPLICATE_API_TOKEN"))
             }

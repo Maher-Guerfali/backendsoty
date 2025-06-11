@@ -3,9 +3,12 @@ import json
 import logging
 import uuid
 import aiohttp
+import base64
+import io
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 from fastapi import HTTPException
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -13,15 +16,15 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 
 if not GROQ_API_KEY:
     logger.error("GROQ_API_KEY environment variable is missing")
     raise ValueError("GROQ_API_KEY environment variable is required")
 
-if not GEMINI_API_KEY:
-    logger.error("GEMINI_API_KEY environment variable is missing")
-    raise ValueError("GEMINI_API_KEY environment variable is required")
+if not REPLICATE_API_TOKEN:
+    logger.error("REPLICATE_API_TOKEN environment variable is missing")
+    raise ValueError("REPLICATE_API_TOKEN environment variable is required")
 
 class StoryPart(BaseModel):
     part_number: int
@@ -39,11 +42,24 @@ class GeneratedStory(BaseModel):
 class StoryGenerator:
     def __init__(self):
         self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
-        self.gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
         self.headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {GROQ_API_KEY}"
         }
+        
+    def _encode_image_to_base64(self, image: Image.Image) -> str:
+        """Convert PIL Image to base64 string"""
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        img_str = base64.b64encode(buffer.getvalue()).decode()
+        return f"data:image/png;base64,{img_str}"
+        
+    def _decode_base64_image(self, base64_string: str) -> Image.Image:
+        """Convert base64 string to PIL Image"""
+        if base64_string.startswith('data:image'):
+            base64_string = base64_string.split(',')[1]
+        image_data = base64.b64decode(base64_string)
+        return Image.open(io.BytesIO(image_data))
 
     async def generate_story(self, username: str, theme: str) -> GeneratedStory:
         """
@@ -160,81 +176,69 @@ class StoryGenerator:
     
     async def generate_images(self, story: GeneratedStory, face_image_url: str) -> GeneratedStory:
         """
-        Generate images for each part of the story using Stability AI
+        Generate images for each part of the story using Replicate's img2img
         """
         try:
-            async with aiohttp.ClientSession() as session:
-                # Create a list of tasks for concurrent processing
-                tasks = []
+            import replicate
+            
+            # Download the face image
+            try:
+                if face_image_url.startswith('http'):
+                    response = requests.get(face_image_url)
+                    response.raise_for_status()
+                    face_image = Image.open(io.BytesIO(response.content))
+                else:
+                    face_image = self._decode_base64_image(face_image_url)
                 
-                # Create tasks for each part
+                face_image = face_image.convert("RGB")
+                
+                # Process each story part
                 for part in story.parts:
-                    payload = {
-                        "key": STABILITY_API_KEY,
-                        "prompt": part.image_prompt,
-                        "init_image": face_image_url,
-                        "width": "512",
-                        "height": "512",
-                        "samples": "1",
-                        "num_inference_steps": "30",
-                        "guidance_scale": 7.5,
-                        "strength": 0.7
-                    }
-                    
-                    # Create a coroutine for each image generation
-                    async def generate_image(part: StoryPart, payload: dict):
-                        try:
-                            async with session.post(
-                                self.stability_url,
-                                json=payload,
-                                headers={"Content-Type": "application/json"},
-                                timeout=30  # Add timeout
-                            ) as response:
-                                if response.status != 200:
-                                    logger.error(f"HTTP error {response.status} for part {part.part_number}")
-                                    part.status = "failed"
-                                    return
-                                
-                                result = await response.json()
-                                
-                                if "output" not in result:
-                                    logger.error(f"Invalid response for part {part.part_number}: {result}")
-                                    part.status = "failed"
-                                    return
-                                
-                                # Update the part with the generated image URL
-                                part.image_url = result["output"][0]
-                                part.status = "completed"
-                                
-                        except asyncio.TimeoutError:
-                            logger.error(f"Timeout generating image for part {part.part_number}")
-                            part.status = "failed"
-                        except Exception as e:
-                            logger.error(f"Error generating image for part {part.part_number}: {str(e)}")
-                            part.status = "failed"
-                    
-                    # Add the task to our list
-                    tasks.append(generate_image(part, payload))
-                
-                # Run all tasks concurrently with a limit
-                # We limit to 3 concurrent tasks to avoid overwhelming the API
-                async def process_tasks(tasks, limit=3):
-                    semaphore = asyncio.Semaphore(limit)
-                    
-                    async def process_task(task):
-                        async with semaphore:
-                            await task
-                    
-                    await asyncio.gather(*[process_task(task) for task in tasks])
-                
-                await process_tasks(tasks)
+                    try:
+                        # Convert the face image to base64 for Replicate
+                        image_b64 = self._encode_image_to_base64(face_image)
+                        
+                        # Call Replicate API
+                        output = replicate.run(
+                            "stability-ai/stable-diffusion:db21e45d3f7023abc2a46ee38a23973f6dce16bb082a930b0c49861f96d1e5bf",
+                            input={
+                                "image": image_b64,
+                                "prompt": part.image_prompt,
+                                "strength": 0.7,
+                                "guidance_scale": 7.5,
+                                "num_inference_steps": 30
+                            }
+                        )
+                        
+                        # Get the result URL
+                        if isinstance(output, list) and len(output) > 0:
+                            result_url = output[0]
+                        else:
+                            result_url = output
+                            
+                        # Download the generated image
+                        img_response = requests.get(result_url)
+                        img_response.raise_for_status()
+                        
+                        # Update the story part with the new image
+                        part.image_url = result_url
+                        part.status = "completed"
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to generate image for part {part.part_number}: {str(e)}")
+                        part.status = "failed"
                 
                 # Update story status based on parts
                 if all(part.status == "completed" for part in story.parts):
                     story.status = "completed"
-                elif any(part.status == "failed" for part in story.parts):
+                else:
                     story.status = "completed_with_errors"
                 
+                return story
+                
+            except Exception as e:
+                logger.error(f"Failed to process face image: {str(e)}")
+                story.status = "failed"
                 return story
                 
         except Exception as e:
