@@ -21,9 +21,12 @@ from app.api.endpoints.story import router as story_router
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Hardcode port to 8000
-PORT = 8000
+# Get port from environment variable or default to 8000
+PORT = int(os.getenv("PORT", 8000))
 logger.info(f"Starting server on port: {PORT}")
+
+# Ensure the host is set to 0.0.0.0 for Render.com
+HOST = "0.0.0.0"
 
 # Create FastAPI app
 app = FastAPI(
@@ -410,7 +413,7 @@ async def log_requests(request: Request, call_next):
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
+        host=HOST,
+        port=PORT,
         reload=True
     )
