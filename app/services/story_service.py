@@ -5,10 +5,12 @@ import uuid
 import aiohttp
 import base64
 import io
+import requests
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 from fastapi import HTTPException
 from PIL import Image
+import replicate
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -178,9 +180,13 @@ class StoryGenerator:
         """
         Generate images for each part of the story using Replicate's img2img
         """
-        try:
-            import replicate
+        if not REPLICATE_API_TOKEN:
+            raise HTTPException(
+                status_code=500,
+                detail="Replicate API token not configured"
+            )
             
+        try:
             # Download the face image
             try:
                 if face_image_url.startswith('http'):
@@ -195,10 +201,55 @@ class StoryGenerator:
                 # Process each story part
                 for part in story.parts:
                     try:
-                        # Convert the face image to base64 for Replicate
-                        image_b64 = self._encode_image_to_base64(face_image)
+                        logger.info(f"Generating image for part {part.part_number}")
                         
-                        # Call Replicate API
+                        # Save the face image to a temporary file
+                        temp_img = io.BytesIO()
+                        face_image.save(temp_img, format='PNG')
+                        temp_img.seek(0)
+                        
+                        # Save the face image to a temporary file
+                        temp_img_path = f"temp_face_{uuid.uuid4()}.png"
+                        face_image.save(temp_img_path)
+                        
+                        # Call Replicate API for img2img with the correct format
+                        output = replicate.run(
+                            "stability-ai/stable-diffusion-img2img:15a3689ee13b0d2616e98820eca31d4c3abcd36672df6afce5cb6feb1d66087d",
+                            input={
+                                "image": open(temp_img_path, "rb"),
+                                "prompt": part.image_prompt,
+                                "num_inference_steps": 30,
+                                "guidance_scale": 7.5,
+                                "strength": 0.8,
+                                "negative_prompt": "blurry, low quality, distorted, deformed"
+                            }
+                        )
+                        
+                        # Clean up the temporary file
+                        try:
+                            os.remove(temp_img_path)
+                        except:
+                            pass
+                        
+                        # Get the generated image URL
+                        if isinstance(output, list) and len(output) > 0:
+                            image_url = output[0]
+                        else:
+                            image_url = output
+                            
+                        # Download the generated image
+                        response = requests.get(image_url)
+                        response.raise_for_status()
+                        
+                        # Convert to base64 for storage
+                        img_data = io.BytesIO(response.content)
+                        part.image_url = f"data:image/png;base64,{base64.b64encode(img_data.getvalue()).decode()}"
+                        part.status = "completed"
+                        logger.info(f"Successfully generated image for part {part.part_number}")
+                        
+                    except Exception as img_error:
+                        logger.error(f"Error generating image for part {part.part_number}: {str(img_error)}")
+                        part.status = f"error: {str(img_error)}"
                         output = replicate.run(
                             "stability-ai/stable-diffusion:db21e45d3f7023abc2a46ee38a23973f6dce16bb082a930b0c49861f96d1e5bf",
                             input={
