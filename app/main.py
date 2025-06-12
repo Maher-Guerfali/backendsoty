@@ -21,12 +21,13 @@ from app.api.endpoints.story import router as story_router
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Get port from environment variable or default to 8000
-PORT = int(os.getenv("PORT", 8000))
-logger.info(f"Starting server on port: {PORT}")
+# Get port from environment variable or default to 10000
+PORT = int(os.getenv("PORT", 10000))
+HOST = os.getenv("HOST", "0.0.0.0")
 
-# Ensure the host is set to 0.0.0.0 for Render.com
-HOST = "0.0.0.0"
+# Log the host and port being used
+logger.info(f"Starting server on {HOST}:{PORT}")
+logger.info(f"Environment: {os.getenv('ENVIRONMENT', 'development')}")
 
 # Create FastAPI app
 app = FastAPI(
