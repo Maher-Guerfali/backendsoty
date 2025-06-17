@@ -410,6 +410,7 @@ async def log_requests(request: Request, call_next):
         )
         raise
 
+# This block is only for local development
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
@@ -417,3 +418,6 @@ if __name__ == "__main__":
         port=PORT,
         reload=True
     )
+
+# For production on Render.com, the app will be started using:
+# uvicorn app.main:app --host 0.0.0.0 --port $PORT
