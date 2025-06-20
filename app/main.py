@@ -412,6 +412,7 @@ async def log_requests(request: Request, call_next):
 
 # This block is only for local development
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(
         "app.main:app",
         host=HOST,
