@@ -6,7 +6,10 @@ set -e
 set -x
 
 # Use Render's PORT environment variable or default to 10000
-PORT=${PORT:-10000}
+export PORT=${PORT:-10000}
+
+# Set host to 0.0.0.0 to make it accessible from outside the container
+export HOST=0.0.0.0
 
 # Make sure the script has execute permissions
 chmod +x "$0"
