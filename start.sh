@@ -44,8 +44,8 @@ if [ -z "$GROQ_API_KEY" ]; then
     exit 1
 fi
 
-if [ -z "$STABILITY_API_KEY" ]; then
-    echo "Error: STABILITY_API_KEY is not set"
+if [ -z "$REPLICATE_API_TOKEN" ]; then
+    echo "Error: REPLICATE_API_TOKEN is not set"
     exit 1
 fi
 
