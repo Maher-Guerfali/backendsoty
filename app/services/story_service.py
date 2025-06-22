@@ -193,33 +193,45 @@ class StoryGenerator:
                 detail="Replicate API token not configured"
             )
             
+        if not face_image_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No face image provided"
+            )
+            
         try:
             # Download the face image
             try:
                 if face_image_url.startswith('http'):
-                    response = requests.get(face_image_url)
+                    response = requests.get(face_image_url, timeout=30)
                     response.raise_for_status()
                     face_image = Image.open(io.BytesIO(response.content))
-                else:
+                elif face_image_url.startswith('data:image'):
+                    # Handle base64 encoded image
                     face_image = self._decode_base64_image(face_image_url)
+                else:
+                    raise ValueError("Invalid image format. Must be a URL or base64 encoded image.")
                 
                 face_image = face_image.convert("RGB")
                 
-                # Process each story part
-                for part in story.parts:
+            except Exception as e:
+                logger.error(f"Failed to load face image: {str(e)}")
+                story.status = "failed"
+                story.error = f"Failed to load face image: {str(e)}"
+                return story
+            
+            # Process each story part
+            for part in story.parts:
+                temp_img_path = None
+                try:
+                    logger.info(f"Generating image for part {part.part_number}")
+                    
+                    # Create a temporary file for the face image
+                    temp_img_path = f"temp_face_{uuid.uuid4()}.png"
+                    face_image.save(temp_img_path, format='PNG')
+                    
+                    # First try: img2img
                     try:
-                        logger.info(f"Generating image for part {part.part_number}")
-                        
-                        # Save the face image to a temporary file
-                        temp_img = io.BytesIO()
-                        face_image.save(temp_img, format='PNG')
-                        temp_img.seek(0)
-                        
-                        # Save the face image to a temporary file
-                        temp_img_path = f"temp_face_{uuid.uuid4()}.png"
-                        face_image.save(temp_img_path)
-                        
-                        # Call Replicate API for img2img with the correct format
                         output = replicate.run(
                             "stability-ai/stable-diffusion-img2img:15a3689ee13b0d2616e98820eca31d4c3abcd36672df6afce5cb6feb1d66087d",
                             input={
@@ -228,24 +240,15 @@ class StoryGenerator:
                                 "num_inference_steps": 30,
                                 "guidance_scale": 7.5,
                                 "strength": 0.8,
-                                "negative_prompt": "blurry, low quality, distorted, deformed"
+                                "negative_prompt": "blurry, low quality, distorted, deformed, text, watermark"
                             }
                         )
                         
-                        # Clean up the temporary file
-                        try:
-                            os.remove(temp_img_path)
-                        except:
-                            pass
-                        
                         # Get the generated image URL
-                        if isinstance(output, list) and len(output) > 0:
-                            image_url = output[0]
-                        else:
-                            image_url = output
-                            
+                        image_url = output[0] if isinstance(output, list) else output
+                        
                         # Download the generated image
-                        response = requests.get(image_url)
+                        response = requests.get(image_url, timeout=60)
                         response.raise_for_status()
                         
                         # Convert to base64 for storage
@@ -254,52 +257,65 @@ class StoryGenerator:
                         part.status = "completed"
                         logger.info(f"Successfully generated image for part {part.part_number}")
                         
-                    except Exception as img_error:
-                        logger.error(f"Error generating image for part {part.part_number}: {str(img_error)}")
-                        part.status = f"error: {str(img_error)}"
-                        output = replicate.run(
-                            "stability-ai/stable-diffusion:db21e45d3f7023abc2a46ee38a23973f6dce16bb082a930b0c49861f96d1e5bf",
-                            input={
-                                "image": image_b64,
-                                "prompt": part.image_prompt,
-                                "strength": 0.7,
-                                "guidance_scale": 7.5,
-                                "num_inference_steps": 30
-                            }
-                        )
+                    except Exception as img2img_error:
+                        logger.warning(f"Image generation with img2img failed, trying txt2img: {str(img2img_error)}")
                         
-                        # Get the result URL
-                        if isinstance(output, list) and len(output) > 0:
-                            result_url = output[0]
-                        else:
-                            result_url = output
+                        # Fallback: txt2img
+                        try:
+                            output = replicate.run(
+                                "stability-ai/stable-diffusion:db21e45d3f7023abc2a46ee38a23973f6dce16bb082a930b0c49861f96d1e5bf",
+                                input={
+                                    "prompt": f"{part.image_prompt}, high quality, detailed, professional",
+                                    "width": 512,
+                                    "height": 512,
+                                    "num_inference_steps": 30,
+                                    "guidance_scale": 7.5,
+                                    "negative_prompt": "blurry, low quality, distorted, deformed, text, watermark"
+                                }
+                            )
                             
-                        # Download the generated image
-                        img_response = requests.get(result_url)
-                        img_response.raise_for_status()
-                        
-                        # Update the story part with the new image
-                        part.image_url = result_url
-                        part.status = "completed"
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to generate image for part {part.part_number}: {str(e)}")
-                        part.status = "failed"
-                
-                # Update story status based on parts
-                if all(part.status == "completed" for part in story.parts):
-                    story.status = "completed"
-                else:
-                    story.status = "completed_with_errors"
-                
-                return story
-                
-            except Exception as e:
-                logger.error(f"Failed to process face image: {str(e)}")
+                            # Get the generated image URL
+                            image_url = output[0] if isinstance(output, list) else output
+                            
+                            # Download the generated image
+                            response = requests.get(image_url, timeout=60)
+                            response.raise_for_status()
+                            
+                            # Convert to base64 for storage
+                            img_data = io.BytesIO(response.content)
+                            part.image_url = f"data:image/png;base64,{base64.b64encode(img_data.getvalue()).decode()}"
+                            part.status = "completed"
+                            logger.info(f"Successfully generated fallback image for part {part.part_number}")
+                            
+                        except Exception as txt2img_error:
+                            logger.error(f"Failed to generate image with txt2img: {str(txt2img_error)}")
+                            part.status = f"error: {str(txt2img_error)}"
+                            continue
+                            
+                except Exception as e:
+                    logger.error(f"Unexpected error generating image for part {part.part_number}: {str(e)}")
+                    part.status = f"error: {str(e)}"
+                    
+                finally:
+                    # Clean up the temporary file
+                    if temp_img_path and os.path.exists(temp_img_path):
+                        try:
+                            os.remove(temp_img_path)
+                        except Exception as e:
+                            logger.warning(f"Failed to remove temporary file {temp_img_path}: {str(e)}")
+            
+            # Update story status based on parts
+            if all(part.status == "completed" for part in story.parts):
+                story.status = "completed"
+            elif any(part.status == "completed" for part in story.parts):
+                story.status = "completed_with_errors"
+            else:
                 story.status = "failed"
-                return story
+            
+            return story
                 
         except Exception as e:
-            logger.error(f"Error in generate_images: {str(e)}")
+            logger.error(f"Error in generate_images: {str(e)}", exc_info=True)
             story.status = "failed"
+            story.error = str(e)
             return story
