@@ -3,6 +3,9 @@ from fastapi.responses import JSONResponse
 from typing import Dict, Any, Optional
 import uuid
 import asyncio
+import base64
+from io import BytesIO
+from PIL import Image
 import os
 import base64
 import logging
@@ -156,11 +159,12 @@ async def generate_story(
                     face_image_data = story_request.face_image_url
 
                 # Validate base64
-                if face_image_data.startswith('http'):
-                    logger.info("Face image is a URL, will be processed later")
-                else:
+                if not face_image_data.startswith('http'):
                     logger.debug("Validating base64 data")
-                    base64.b64decode(face_image_data)
+                    try:
+                        base64.b64decode(face_image_data, validate=True)
+                    except Exception as e:
+                        raise ValueError(f"Invalid base64 data: {str(e)}")
                     
             except Exception as e:
                 error_msg = f"Invalid image data: {str(e)}"
@@ -182,13 +186,8 @@ async def generate_story(
         
         # Validate face image
         try:
-            # Test if we can decode the image
+# Test if we can decode the image
             if story_request.face_image_url.startswith('data:image'):
-                # Handle base64 image
-                import base64
-                from io import BytesIO
-                from PIL import Image
-                
                 # Extract the base64 part
                 if ',' in story_request.face_image_url:
                     base64_str = story_request.face_image_url.split(',', 1)[1]
@@ -196,13 +195,16 @@ async def generate_story(
                     base64_str = story_request.face_image_url
                 
                 # Decode and verify image
-                img_data = base64.b64decode(base64_str)
-                img = Image.open(BytesIO(img_data))
-                img.verify()  # Verify it's a valid image
-                
-                logger.info(f"Successfully validated base64 image: {img.format}, {img.size}")
-            
+                try:
+                    img_data = base64.b64decode(base64_str)
+                    img = Image.open(BytesIO(img_data))
+                    img.verify()  # Verify it's a valid image
+                    logger.info(f"Successfully validated base64 image: {img.format}, {img.size}")
+                except Exception as img_err:
+                    raise ValueError(f"Invalid image data: {str(img_err)}")
             # For URL, we'll validate it in the background task
+            elif story_request.face_image_url.startswith('http'):
+                logger.info("Face image is a URL, will be validated in background task")
             
         except Exception as img_error:
             error_msg = f"Invalid image format: {str(img_error)}"
