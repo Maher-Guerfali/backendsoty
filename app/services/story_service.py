@@ -11,7 +11,6 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 from fastapi import HTTPException
 from PIL import Image
-import replicate
 from dotenv import load_dotenv
 
 # Configure logging
@@ -24,16 +23,20 @@ load_dotenv(dotenv_path=env_path)
 
 # Get environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 
 # Validate required environment variables
 if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
     logger.error("GROQ_API_KEY environment variable is missing or not configured")
     raise ValueError("GROQ_API_KEY environment variable is required")
 
-if not REPLICATE_API_TOKEN or REPLICATE_API_TOKEN == "your_replicate_api_token_here":
-    logger.error("REPLICATE_API_TOKEN environment variable is missing or not configured")
-    raise ValueError("REPLICATE_API_TOKEN environment variable is required")
+if not HF_API_TOKEN or HF_API_TOKEN == "your_hf_api_token_here":
+    logger.error("HF_API_TOKEN environment variable is missing or not configured")
+    raise ValueError("HF_API_TOKEN environment variable is required")
+
+# Hugging Face API configuration
+HF_API_URL = "https://api-inference.huggingface.co/models/CompVis/stable-diffusion-v1-4"
+HF_HEADERS = {"Authorization": f"Bearer {HF_API_TOKEN}"}
 
 class StoryPart(BaseModel):
     part_number: int
@@ -198,12 +201,12 @@ class StoryGenerator:
     
     async def generate_images(self, story: GeneratedStory, face_image_url: str) -> GeneratedStory:
         """
-        Generate images for each part of the story using Replicate's img2img
+        Generate images for each part of the story using Hugging Face's Stable Diffusion
         """
-        if not REPLICATE_API_TOKEN:
+        if not HF_API_TOKEN:
             raise HTTPException(
                 status_code=500,
-                detail="Replicate API token not configured"
+                detail="Hugging Face API token not configured"
             )
             
         if not face_image_url:
@@ -243,7 +246,7 @@ class StoryGenerator:
                     temp_img_path = f"temp_face_{uuid.uuid4()}.png"
                     face_image.save(temp_img_path, format='PNG')
                     
-                    # First try: img2img with face image
+                    # Generate image using Hugging Face API
                     try:
                         logger.info(f"Generating image with prompt: {part.image_prompt}")
                         
@@ -254,40 +257,37 @@ class StoryGenerator:
                             "vibrant colors, magical atmosphere, clear facial features"
                         )
                         
-                        # Use a model that's better at preserving faces
-                        output = replicate.run(
-                            "lucataco/sdxl-controlnet:1f4d5f8e9c0569283d7d3c0a544e06b4b5a8d6d8b6f9a6d3c3e2d5e8f4a1d3",
-                            input={
-                                "image": open(temp_img_path, "rb"),
+                        # Prepare the request data
+                        with open(temp_img_path, "rb") as img_file:
+                            base64_image = base64.b64encode(img_file.read()).decode('utf-8')
+                        
+                        data = {
+                            "inputs": {
                                 "prompt": enhanced_prompt,
+                                "init_image": f"data:image/png;base64,{base64_image}",
+                                "strength": 0.7,
+                                "guidance_scale": 7.5,
                                 "num_inference_steps": 40,
-                                "guidance_scale": 8.0,
-                                "prompt_strength": 0.9,
-                                "scheduler": "K_EULER_ANCESTRAL",
                                 "negative_prompt": (
                                     "blurry, low quality, distorted, deformed, text, watermark, "
                                     "multiple faces, cropped faces, bad anatomy, extra limbs"
-                                ),
-                                "controlnet_conditioning_scale": 0.8,
-                                "controlnet_conditioning_scale_end": 0.8,
-                                "controlnet_start": 0.0,
-                                "controlnet_end": 1.0,
-                                "controlnet_model": "canny"
+                                )
                             }
+                        }
+                        
+                        # Call Hugging Face API
+                        response = requests.post(
+                            HF_API_URL,
+                            headers=HF_HEADERS,
+                            json=data,
+                            timeout=120
                         )
                         
-                        # Get the generated image URL
-                        if not output or (isinstance(output, list) and not output):
-                            raise ValueError("No image URL returned from Replicate")
-                            
-                        image_url = output[0] if isinstance(output, list) else output
-                        logger.info(f"Generated image URL: {image_url}")
+                        if response.status_code != 200:
+                            error_msg = f"Hugging Face API error {response.status_code}: {response.text}"
+                            raise Exception(error_msg)
                         
-                        # Download the generated image
-                        response = requests.get(image_url, timeout=120)
-                        response.raise_for_status()
-                        
-                        # Convert to base64 for storage
+                        # Get the generated image
                         img_data = io.BytesIO(response.content)
                         img_base64 = base64.b64encode(img_data.getvalue()).decode()
                         part.image_url = f"data:image/png;base64,{img_base64}"
@@ -300,71 +300,10 @@ class StoryGenerator:
                             f.write(base64.b64decode(img_base64))
                         logger.info(f"Saved debug image to {debug_img_path}")
                         
-                    except Exception as img2img_error:
-                        logger.warning(f"Image generation with img2img failed: {str(img2img_error)}")
-                        
-                        # Fallback: txt2img with face embedding
-                        try:
-                            logger.warning("Falling back to txt2img with face preservation")
-                            
-                            # Enhance the prompt for better face generation
-                            enhanced_prompt = (
-                                f"{part.image_prompt}, "
-                                "highly detailed digital painting, children's book illustration style, "
-                                "magical atmosphere, vibrant colors, clear facial features, "
-                                "professional composition, 4k, 8k, ultra detailed"
-                            )
-                            
-                            output = replicate.run(
-                                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-                                input={
-                                    "prompt": enhanced_prompt,
-                                    "width": 768,
-                                    "height": 1024,
-                                    "num_inference_steps": 40,
-                                    "guidance_scale": 8.0,
-                                    "scheduler": "K_EULER_ANCESTRAL",
-                                    "negative_prompt": (
-                                        "blurry, low quality, distorted, deformed, text, watermark, "
-                                        "multiple faces, cropped faces, bad anatomy, extra limbs, "
-                                        "poorly drawn face, disfigured face, bad proportions, "
-                                        "ugly, duplicate, morbid, mutilated, extra fingers, "
-                                        "mutation, poorly drawn hands, bad hands, fused fingers"
-                                    ),
-                                    "refine": "expert_ensemble_refiner",
-                                    "high_noise_frac": 0.8,
-                                    "apply_watermark": False
-                                }
-                            )
-                            
-                            # Get the generated image URL
-                            if not output or (isinstance(output, list) and not output):
-                                raise ValueError("No image URL returned from Replicate in fallback")
-                                
-                            image_url = output[0] if isinstance(output, list) else output
-                            logger.info(f"Generated fallback image URL: {image_url}")
-                            
-                            # Download the generated image with a longer timeout
-                            response = requests.get(image_url, timeout=180)
-                            response.raise_for_status()
-                            
-                            # Convert to base64 for storage
-                            img_data = io.BytesIO(response.content)
-                            img_base64 = base64.b64encode(img_data.getvalue()).decode()
-                            part.image_url = f"data:image/png;base64,{img_base64}"
-                            part.status = "completed"
-                            logger.info(f"Successfully generated fallback image for part {part.part_number}")
-                            
-                            # Save a debug copy
-                            debug_path = f"debug_fallback_{part.part_number}.png"
-                            with open(debug_path, "wb") as f:
-                                f.write(base64.b64decode(img_base64))
-                            logger.info(f"Saved fallback debug image to {debug_path}")
-                            
-                        except Exception as txt2img_error:
-                            logger.error(f"Failed to generate image with txt2img: {str(txt2img_error)}")
-                            part.status = f"error: {str(txt2img_error)}"
-                            continue
+                    except Exception as img_gen_error:
+                        logger.error(f"Image generation failed: {str(img_gen_error)}")
+                        part.status = f"error: {str(img_gen_error)}"
+                        continue
                             
                 except Exception as e:
                     logger.error(f"Unexpected error generating image for part {part.part_number}: {str(e)}")
