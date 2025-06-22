@@ -6,26 +6,33 @@ import aiohttp
 import base64
 import io
 import requests
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 from fastapi import HTTPException
 from PIL import Image
 import replicate
+from dotenv import load_dotenv
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# Load environment variables from .env file
+env_path = Path(__file__).parent.parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
+
+# Get environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 
-if not GROQ_API_KEY:
-    logger.error("GROQ_API_KEY environment variable is missing")
+# Validate required environment variables
+if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
+    logger.error("GROQ_API_KEY environment variable is missing or not configured")
     raise ValueError("GROQ_API_KEY environment variable is required")
 
-if not REPLICATE_API_TOKEN:
-    logger.error("REPLICATE_API_TOKEN environment variable is missing")
+if not REPLICATE_API_TOKEN or REPLICATE_API_TOKEN == "your_replicate_api_token_here":
+    logger.error("REPLICATE_API_TOKEN environment variable is missing or not configured")
     raise ValueError("REPLICATE_API_TOKEN environment variable is required")
 
 class StoryPart(BaseModel):
