@@ -62,12 +62,24 @@ echo "============================================"
 # Start the server
 echo "Starting FastAPI server on 0.0.0.0:$PORT..."
 
+# Print current directory and list files for debugging
+echo "Current directory: $(pwd)"
+echo "Files in current directory:"
+ls -la
+
+# Check if uvicorn.json exists and is readable
+if [ ! -f "uvicorn.json" ]; then
+    echo "Error: uvicorn.json not found in $(pwd)"
+    exit 1
+fi
+
 # Run the FastAPI app with logging
+echo "Starting Uvicorn with config: $(pwd)/uvicorn.json"
 exec uvicorn app.main:app \
     --host 0.0.0.0 \
     --port $PORT \
     --log-level debug \
-    --log-config uvicorn.json \
+    --log-config $(pwd)/uvicorn.json \
     --workers 1 \
     --access-log \
     --proxy-headers \

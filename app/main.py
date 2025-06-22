@@ -84,3 +84,7 @@ if __name__ == "__main__":
 
 # For production on Render.com, the app will be started using:
 # uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+# This is needed for production on Render
+app.state.host = HOST
+app.state.port = PORT
