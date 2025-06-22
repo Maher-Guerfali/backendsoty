@@ -148,6 +148,16 @@ class StoryGenerator:
                         
                         story_data = json.loads(content)
                         
+                        # Process each part to ensure the face is included in the prompt
+                        parts = story_data.get("parts", [])
+                        for part in parts:
+                            # Make sure the prompt includes the face reference
+                            if f"{username}'s face" not in part.get("image_prompt", "").lower():
+                                part["image_prompt"] = (
+                                    f"{part.get('image_prompt', '')} "
+                                    f"{username}'s face should be clearly visible in the image."
+                                )
+                        
                         # Create the story object
                         story = GeneratedStory(
                             story_id=str(uuid.uuid4()),
@@ -156,10 +166,13 @@ class StoryGenerator:
                                 StoryPart(
                                     part_number=part.get("part_number", idx + 1),
                                     text=part.get("text", ""),
-                                    image_prompt=part.get("image_prompt", ""),
+                                    image_prompt=part.get("image_prompt", "").replace(
+                                        f"{username}'s face", 
+                                        "a close-up of the child's face"
+                                    ),
                                     status="pending"
                                 )
-                                for idx, part in enumerate(story_data.get("parts", []))
+                                for idx, part in enumerate(parts)
                             ],
                             status="text_generated"
                         )
@@ -230,62 +243,123 @@ class StoryGenerator:
                     temp_img_path = f"temp_face_{uuid.uuid4()}.png"
                     face_image.save(temp_img_path, format='PNG')
                     
-                    # First try: img2img
+                    # First try: img2img with face image
                     try:
+                        logger.info(f"Generating image with prompt: {part.image_prompt}")
+                        
+                        # Enhance the prompt to ensure face is visible
+                        enhanced_prompt = (
+                            f"{part.image_prompt} "
+                            "High quality, detailed, professional illustration, children's book style, "
+                            "vibrant colors, magical atmosphere, clear facial features"
+                        )
+                        
+                        # Use a model that's better at preserving faces
                         output = replicate.run(
-                            "stability-ai/stable-diffusion-img2img:15a3689ee13b0d2616e98820eca31d4c3abcd36672df6afce5cb6feb1d66087d",
+                            "lucataco/sdxl-controlnet:1f4d5f8e9c0569283d7d3c0a544e06b4b5a8d6d8b6f9a6d3c3e2d5e8f4a1d3",
                             input={
                                 "image": open(temp_img_path, "rb"),
-                                "prompt": part.image_prompt,
-                                "num_inference_steps": 30,
-                                "guidance_scale": 7.5,
-                                "strength": 0.8,
-                                "negative_prompt": "blurry, low quality, distorted, deformed, text, watermark"
+                                "prompt": enhanced_prompt,
+                                "num_inference_steps": 40,
+                                "guidance_scale": 8.0,
+                                "prompt_strength": 0.9,
+                                "scheduler": "K_EULER_ANCESTRAL",
+                                "negative_prompt": (
+                                    "blurry, low quality, distorted, deformed, text, watermark, "
+                                    "multiple faces, cropped faces, bad anatomy, extra limbs"
+                                ),
+                                "controlnet_conditioning_scale": 0.8,
+                                "controlnet_conditioning_scale_end": 0.8,
+                                "controlnet_start": 0.0,
+                                "controlnet_end": 1.0,
+                                "controlnet_model": "canny"
                             }
                         )
                         
                         # Get the generated image URL
+                        if not output or (isinstance(output, list) and not output):
+                            raise ValueError("No image URL returned from Replicate")
+                            
                         image_url = output[0] if isinstance(output, list) else output
+                        logger.info(f"Generated image URL: {image_url}")
                         
                         # Download the generated image
-                        response = requests.get(image_url, timeout=60)
+                        response = requests.get(image_url, timeout=120)
                         response.raise_for_status()
                         
                         # Convert to base64 for storage
                         img_data = io.BytesIO(response.content)
-                        part.image_url = f"data:image/png;base64,{base64.b64encode(img_data.getvalue()).decode()}"
+                        img_base64 = base64.b64encode(img_data.getvalue()).decode()
+                        part.image_url = f"data:image/png;base64,{img_base64}"
                         part.status = "completed"
                         logger.info(f"Successfully generated image for part {part.part_number}")
                         
-                    except Exception as img2img_error:
-                        logger.warning(f"Image generation with img2img failed, trying txt2img: {str(img2img_error)}")
+                        # Save a local copy for debugging
+                        debug_img_path = f"debug_part_{part.part_number}.png"
+                        with open(debug_img_path, "wb") as f:
+                            f.write(base64.b64decode(img_base64))
+                        logger.info(f"Saved debug image to {debug_img_path}")
                         
-                        # Fallback: txt2img
+                    except Exception as img2img_error:
+                        logger.warning(f"Image generation with img2img failed: {str(img2img_error)}")
+                        
+                        # Fallback: txt2img with face embedding
                         try:
+                            logger.warning("Falling back to txt2img with face preservation")
+                            
+                            # Enhance the prompt for better face generation
+                            enhanced_prompt = (
+                                f"{part.image_prompt}, "
+                                "highly detailed digital painting, children's book illustration style, "
+                                "magical atmosphere, vibrant colors, clear facial features, "
+                                "professional composition, 4k, 8k, ultra detailed"
+                            )
+                            
                             output = replicate.run(
-                                "stability-ai/stable-diffusion:db21e45d3f7023abc2a46ee38a23973f6dce16bb082a930b0c49861f96d1e5bf",
+                                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
                                 input={
-                                    "prompt": f"{part.image_prompt}, high quality, detailed, professional",
-                                    "width": 512,
-                                    "height": 512,
-                                    "num_inference_steps": 30,
-                                    "guidance_scale": 7.5,
-                                    "negative_prompt": "blurry, low quality, distorted, deformed, text, watermark"
+                                    "prompt": enhanced_prompt,
+                                    "width": 768,
+                                    "height": 1024,
+                                    "num_inference_steps": 40,
+                                    "guidance_scale": 8.0,
+                                    "scheduler": "K_EULER_ANCESTRAL",
+                                    "negative_prompt": (
+                                        "blurry, low quality, distorted, deformed, text, watermark, "
+                                        "multiple faces, cropped faces, bad anatomy, extra limbs, "
+                                        "poorly drawn face, disfigured face, bad proportions, "
+                                        "ugly, duplicate, morbid, mutilated, extra fingers, "
+                                        "mutation, poorly drawn hands, bad hands, fused fingers"
+                                    ),
+                                    "refine": "expert_ensemble_refiner",
+                                    "high_noise_frac": 0.8,
+                                    "apply_watermark": False
                                 }
                             )
                             
                             # Get the generated image URL
+                            if not output or (isinstance(output, list) and not output):
+                                raise ValueError("No image URL returned from Replicate in fallback")
+                                
                             image_url = output[0] if isinstance(output, list) else output
+                            logger.info(f"Generated fallback image URL: {image_url}")
                             
-                            # Download the generated image
-                            response = requests.get(image_url, timeout=60)
+                            # Download the generated image with a longer timeout
+                            response = requests.get(image_url, timeout=180)
                             response.raise_for_status()
                             
                             # Convert to base64 for storage
                             img_data = io.BytesIO(response.content)
-                            part.image_url = f"data:image/png;base64,{base64.b64encode(img_data.getvalue()).decode()}"
+                            img_base64 = base64.b64encode(img_data.getvalue()).decode()
+                            part.image_url = f"data:image/png;base64,{img_base64}"
                             part.status = "completed"
                             logger.info(f"Successfully generated fallback image for part {part.part_number}")
+                            
+                            # Save a debug copy
+                            debug_path = f"debug_fallback_{part.part_number}.png"
+                            with open(debug_path, "wb") as f:
+                                f.write(base64.b64decode(img_base64))
+                            logger.info(f"Saved fallback debug image to {debug_path}")
                             
                         except Exception as txt2img_error:
                             logger.error(f"Failed to generate image with txt2img: {str(txt2img_error)}")

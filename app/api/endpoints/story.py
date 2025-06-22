@@ -27,35 +27,63 @@ async def generate_story_background(
     """
     Background task to generate story and images
     """
+    logger.info(f"[Story {story_id}] Starting story generation for {username} with theme: {theme}")
+    
     try:
-        logger.info(f"Starting story generation for {username} with theme: {theme}")
-        story_generator = StoryGenerator()
+        if story_id not in stories:
+            logger.error(f"[Story {story_id}] Story not found in memory")
+            return
+            
         story = stories[story_id]
+        story_generator = StoryGenerator()
         
-        # Generate story text
-        logger.info("Generating story text...")
-        generated_story = await story_generator.generate_story(username, theme)
-        
-        # Update story with generated parts
-        story.title = generated_story.title
-        story.parts = generated_story.parts
-        story.status = "text_generated"
-        
-        # Generate images
-        logger.info("Generating images...")
-        await story_generator.generate_images(story, face_image_url)
-        
-        # Final update
-        story.status = "completed"
-        logger.info(f"Story generation completed for {username}")
-        
+        try:
+            # Generate story text
+            logger.info(f"[Story {story_id}] Generating story text...")
+            generated_story = await story_generator.generate_story(username, theme)
+            
+            # Update story with generated parts
+            story.title = generated_story.title
+            story.parts = generated_story.parts
+            story.status = "text_generated"
+            story.updated_at = datetime.now().isoformat()
+            logger.info(f"[Story {story_id}] Story text generated successfully")
+            
+            # Generate images if we have a face image
+            if face_image_url:
+                logger.info(f"[Story {story_id}] Starting image generation with face image")
+                try:
+                    await story_generator.generate_images(story, face_image_url)
+                    story.status = "completed"
+                    logger.info(f"[Story {story_id}] Image generation completed successfully")
+                except Exception as img_error:
+                    error_msg = f"Image generation failed: {str(img_error)}"
+                    logger.error(f"[Story {story_id}] {error_msg}", exc_info=True)
+                    story.status = "failed"
+                    story.error = error_msg
+                    # Don't re-raise to prevent the task from failing completely
+            else:
+                logger.warning(f"[Story {story_id}] No face image provided, skipping image generation")
+                story.status = "completed_no_images"
+                
+        except Exception as gen_error:
+            error_msg = f"Story generation failed: {str(gen_error)}"
+            logger.error(f"[Story {story_id}] {error_msg}", exc_info=True)
+            story.status = "failed"
+            story.error = error_msg
+            raise  # Re-raise to mark task as failed
+            
     except Exception as e:
-        error_msg = f"Error in background story generation: {str(e)}"
-        logger.error(error_msg)
+        error_msg = f"Unexpected error in background task: {str(e)}"
+        logger.error(f"[Story {story_id}] {error_msg}", exc_info=True)
         if story_id in stories:
             stories[story_id].status = "failed"
             stories[story_id].error = error_msg
-        raise
+        raise  # Re-raise to mark task as failed
+    finally:
+        if story_id in stories:
+            stories[story_id].updated_at = datetime.now().isoformat()
+            logger.info(f"[Story {story_id}] Background task completed with status: {stories[story_id].status}")
 
 router = APIRouter()
 
@@ -82,7 +110,6 @@ async def generate_story(
     try:
         # Log request details for debugging
         logger.info(f"Request headers: {dict(request.headers)}")
-        logger.info(f"Request body: {await request.body()}")
         
         # Validate inputs
         if not story_request.username or not story_request.theme:
@@ -95,8 +122,26 @@ async def generate_story(
                     "timestamp": datetime.now().isoformat()
                 }
             )
+            
+        if not story_request.face_image_url:
+            error_msg = "Face image is required"
+            logger.error(error_msg)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": error_msg,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
 
-        # Handle base64 image if provided
+        # Log basic info about the face image
+        face_image_info = ""
+        if story_request.face_image_url.startswith('data:image'):
+            face_image_info = f"Base64 image (length: {len(story_request.face_image_url)})"
+        else:
+            face_image_info = f"Image URL: {story_request.face_image_url[:100]}..."
+            
+        logger.info(f"Processing story generation with face image: {face_image_info}")
         face_image_data = None
         if story_request.face_image_url:
             logger.info("Processing face image from request")
@@ -135,36 +180,96 @@ async def generate_story(
         story_id = str(uuid.uuid4())
         logger.info(f"Generated story ID: {story_id}")
         
-        # Initialize story in memory
-        stories[story_id] = GeneratedStory(
+        # Validate face image
+        try:
+            # Test if we can decode the image
+            if story_request.face_image_url.startswith('data:image'):
+                # Handle base64 image
+                import base64
+                from io import BytesIO
+                from PIL import Image
+                
+                # Extract the base64 part
+                if ',' in story_request.face_image_url:
+                    base64_str = story_request.face_image_url.split(',', 1)[1]
+                else:
+                    base64_str = story_request.face_image_url
+                
+                # Decode and verify image
+                img_data = base64.b64decode(base64_str)
+                img = Image.open(BytesIO(img_data))
+                img.verify()  # Verify it's a valid image
+                
+                logger.info(f"Successfully validated base64 image: {img.format}, {img.size}")
+            
+            # For URL, we'll validate it in the background task
+            
+        except Exception as img_error:
+            error_msg = f"Invalid image format: {str(img_error)}"
+            logger.error(error_msg, exc_info=True)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": error_msg,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+        
+        # Create a new story
+        story = GeneratedStory(
             story_id=story_id,
             title=f"{story_request.username}'s {story_request.theme.capitalize()} Adventure",
             parts=[],
-            status="pending"
+            status="pending",
+            created_at=datetime.now().isoformat(),
+            updated_at=datetime.now().isoformat()
         )
+        stories[story_id] = story
         
-        # Log the background task start
-        logger.info(f"Starting background task for story_id: {story_id}")
+        # Log the start of background task
+        logger.info(f"Starting background story generation with ID: {story_id}")
         
-        # Start background task
-        background_tasks.add_task(
-            generate_story_background,
-            story_id=story_id,
-            username=story_request.username,
-            theme=story_request.theme,
-            face_image_url=face_image_data if face_image_data else None
-        )
+        # Start background task with error handling
+        try:
+            background_tasks.add_task(
+                generate_story_background,
+                story_id=story_id,
+                username=story_request.username,
+                theme=story_request.theme,
+                face_image_url=story_request.face_image_url
+            )
+            
+            logger.info(f"Background task started for story ID: {story_id}")
+            
+            return {
+                "status": "started",
+                "story_id": story_id,
+                "message": "Story generation started",
+                "timestamp": datetime.now().isoformat(),
+                "details": {
+                    "theme": story_request.theme,
+                    "username": story_request.username,
+                    "has_face_image": bool(story_request.face_image_url)
+                }
+            }
+            
+        except Exception as task_error:
+            error_msg = f"Failed to start story generation: {str(task_error)}"
+            logger.error(error_msg, exc_info=True)
+            
+            # Clean up the story entry
+            if story_id in stories:
+                del stories[story_id]
+                
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": error_msg,
+                    "timestamp": datetime.now().isoformat(),
+                    "error_type": type(task_error).__name__
+                }
+            )
         
-        # Return initial response
-        response = {
-            "status": "started",
-            "story_id": story_id,
-            "message": "Story generation started",
-            "timestamp": datetime.now().isoformat()
-        }
-        logger.info(f"Returning response: {response}")
-        return response
-
     except HTTPException as e:
         logger.error(f"HTTP Error generating story: {str(e)}", exc_info=True)
         raise HTTPException(
