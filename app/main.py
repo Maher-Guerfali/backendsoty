@@ -54,12 +54,22 @@ async def health_check():
 app.include_router(story_router, prefix="/api/v1", tags=["stories"])
 
 # CORS Configuration
+# List of allowed origins (add your frontend URLs here)
+origins = [
+    "http://localhost:3000",  # React default port
+    "http://localhost:5173",  # Vite default port
+    "https://mystoria-alpha.vercel.app",  # Your production frontend URL
+    "https://*.vercel.app",  # Vercel preview URLs
+    "https://*.netlify.app",  # Netlify preview URLs
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your frontend URL
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # Exception handlers
