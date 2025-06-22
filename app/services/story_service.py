@@ -49,7 +49,11 @@ class GeneratedStory(BaseModel):
     story_id: str
     title: str
     parts: List[StoryPart]
-    status: str = "text_generated"
+    status: str = "pending"
+    error: Optional[str] = None
+    created_at: str = ""
+    updated_at: str = ""
+    background_task_id: Optional[int] = None
 
 class StoryGenerator:
     def __init__(self):

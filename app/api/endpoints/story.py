@@ -233,7 +233,8 @@ async def generate_story(
         
         # Start background task with error handling
         try:
-            background_tasks.add_task(
+            # Create task and store it
+            task = background_tasks.add_task(
                 generate_story_background,
                 story_id=story_id,
                 username=story_request.username,
@@ -241,7 +242,9 @@ async def generate_story(
                 face_image_url=story_request.face_image_url
             )
             
-            logger.info(f"Background task started for story ID: {story_id}")
+            # Store task reference in the story for potential cancellation
+            story.background_task_id = id(task)
+            logger.info(f"Background task {story.background_task_id} started for story ID: {story_id}")
             
             return {
                 "status": "started",
@@ -300,7 +303,11 @@ async def get_story(story_id: str):
     """
     try:
         if story_id not in stories:
-            raise HTTPException(status_code=404, detail="Story not found")
+            raise HTTPException(status_code=404, detail={
+                "message": "Story not found",
+                "story_id": story_id,
+                "timestamp": datetime.now().isoformat()
+            })
         
         story = stories[story_id]
         
@@ -308,12 +315,40 @@ async def get_story(story_id: str):
         story_dict = story.dict()
         
         # Add some additional status information
-        story_dict["completed_parts"] = sum(1 for part in story.parts if part.status == "completed")
-        story_dict["total_parts"] = len(story.parts)
+        completed_parts = sum(1 for part in story.parts if part.status == "completed")
+        total_parts = len(story.parts)
+        
+        # Calculate progress
+        progress = 0
+        if story.status == "completed":
+            progress = 100
+        elif story.status == "failed":
+            progress = 0
+        elif total_parts > 0:
+            progress = min(99, int((completed_parts / total_parts) * 100))
+        
+        # Add metadata
+        story_dict.update({
+            "completed_parts": completed_parts,
+            "total_parts": total_parts,
+            "progress": progress,
+            "is_complete": story.status in ["completed", "completed_no_images"],
+            "is_failed": story.status == "failed",
+            "error": getattr(story, "error", None),
+            "background_task_id": getattr(story, "background_task_id", None),
+            "created_at": getattr(story, "created_at", ""),
+            "updated_at": getattr(story, "updated_at", "")
+        })
         
         return story_dict
     except HTTPException as e:
         logger.error(f"HTTP Error getting story {story_id}: {str(e)}", exc_info=True)
+        if not isinstance(e.detail, dict):
+            e.detail = {
+                "message": str(e.detail),
+                "story_id": story_id,
+                "timestamp": datetime.now().isoformat()
+            }
         raise
     except Exception as e:
         logger.error(f"Error getting story {story_id}: {str(e)}", exc_info=True)
@@ -322,6 +357,7 @@ async def get_story(story_id: str):
             detail={
                 "message": "Failed to get story",
                 "error": str(e),
+                "story_id": story_id,
                 "timestamp": datetime.now().isoformat()
             }
         )
