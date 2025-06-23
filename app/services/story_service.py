@@ -79,7 +79,7 @@ class StoryGenerator:
 
     async def generate_story(self, username: str, theme: str) -> GeneratedStory:
         """
-        Generate a 4-part story with image prompts using Groq API
+        Generate a 4-part story with a single image that represents the overall story
         """
         try:
             # Validate inputs
@@ -95,18 +95,29 @@ class StoryGenerator:
             - Main character: {username}
             - Theme: {theme}
             
-            For each part, provide:
-            1. A story segment (about 100 words)
-            2. A detailed image prompt that visually represents that part of the story
+            Also provide a single, detailed image prompt that visually represents the overall story.
+            The image should be suitable for all parts of the story and should clearly show {username}'s face.
             
             Format the response as a JSON object with this structure:
             {{
                 "title": "Story Title",
+                "image_prompt": "Detailed image description that represents the whole story...",
                 "parts": [
                     {{
                         "part_number": 1,
-                        "text": "Story text for part 1...",
-                        "image_prompt": "Detailed image description for part 1..."
+                        "text": "Story text for part 1..."
+                    }},
+                    {{
+                        "part_number": 2,
+                        "text": "Story text for part 2..."
+                    }},
+                    {{
+                        "part_number": 3,
+                        "text": "Story text for part 3..."
+                    }},
+                    {{
+                        "part_number": 4,
+                        "text": "Story text for part 4..."
                     }}
                 ]
             }}
@@ -120,13 +131,15 @@ class StoryGenerator:
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 4000
+                    "max_tokens": 4000,
+                    "response_format": {"type": "json_object"}
                 }
                 
                 async with session.post(
                     self.groq_url, 
                     headers=self.headers, 
-                    json=data
+                    json=data,
+                    timeout=60
                 ) as response:
                     if response.status != 200:
                         error_text = await response.text()
@@ -155,17 +168,16 @@ class StoryGenerator:
                         
                         story_data = json.loads(content)
                         
-                        # Process each part to ensure the face is included in the prompt
-                        parts = story_data.get("parts", [])
-                        for part in parts:
-                            # Make sure the prompt includes the face reference
-                            if f"{username}'s face" not in part.get("image_prompt", "").lower():
-                                part["image_prompt"] = (
-                                    f"{part.get('image_prompt', '')} "
-                                    f"{username}'s face should be clearly visible in the image."
-                                )
+                        # Get the single image prompt for the whole story
+                        overall_image_prompt = story_data.get("image_prompt", "")
+                        if not overall_image_prompt:
+                            overall_image_prompt = (
+                                f"A beautiful illustration showing {username} in a {theme} setting. "
+                                f"{username}'s face should be clearly visible. "
+                                "Children's book style, vibrant colors, magical atmosphere."
+                            )
                         
-                        # Create the story object
+                        # Create the story object with the same image prompt for all parts
                         story = GeneratedStory(
                             story_id=str(uuid.uuid4()),
                             title=story_data.get("title", f"{username}'s {theme.capitalize()} Adventure"),
@@ -173,13 +185,10 @@ class StoryGenerator:
                                 StoryPart(
                                     part_number=part.get("part_number", idx + 1),
                                     text=part.get("text", ""),
-                                    image_prompt=part.get("image_prompt", "").replace(
-                                        f"{username}'s face", 
-                                        "a close-up of the child's face"
-                                    ),
+                                    image_prompt=overall_image_prompt,
                                     status="pending"
                                 )
-                                for idx, part in enumerate(parts)
+                                for idx, part in enumerate(story_data.get("parts", []))
                             ],
                             status="text_generated"
                         )
@@ -205,7 +214,7 @@ class StoryGenerator:
     
     async def generate_images(self, story: GeneratedStory, face_image_url: str) -> GeneratedStory:
         """
-        Generate images for each part of the story using Hugging Face's Stable Diffusion
+        Generate a single image for the story and use it for all parts
         """
         if not HF_API_TOKEN:
             raise HTTPException(
@@ -240,94 +249,92 @@ class StoryGenerator:
                 story.error = f"Failed to load face image: {str(e)}"
                 return story
             
-            # Process each story part
-            for part in story.parts:
-                temp_img_path = None
-                try:
-                    logger.info(f"Generating image for part {part.part_number}")
-                    
-                    # Create a temporary file for the face image
-                    temp_img_path = f"temp_face_{uuid.uuid4()}.png"
-                    face_image.save(temp_img_path, format='PNG')
-                    
-                    # Generate image using Hugging Face API
-                    try:
-                        logger.info(f"Generating image with prompt: {part.image_prompt}")
-                        
-                        # Enhance the prompt to ensure face is visible
-                        enhanced_prompt = (
-                            f"{part.image_prompt} "
-                            "High quality, detailed, professional illustration, children's book style, "
-                            "vibrant colors, magical atmosphere, clear facial features"
-                        )
-                        
-                        # Prepare the request data
-                        with open(temp_img_path, "rb") as img_file:
-                            base64_image = base64.b64encode(img_file.read()).decode('utf-8')
-                        
-                        data = {
-                            "inputs": {
-                                "prompt": enhanced_prompt,
-                                "init_image": f"data:image/png;base64,{base64_image}",
-                                "strength": 0.7,
-                                "guidance_scale": 7.5,
-                                "num_inference_steps": 40,
-                                "negative_prompt": (
-                                    "blurry, low quality, distorted, deformed, text, watermark, "
-                                    "multiple faces, cropped faces, bad anatomy, extra limbs"
-                                )
-                            }
-                        }
-                        
-                        # Call Hugging Face API
-                        response = requests.post(
-                            HF_API_URL,
-                            headers=HF_HEADERS,
-                            json=data,
-                            timeout=120
-                        )
-                        
-                        if response.status_code != 200:
-                            error_msg = f"Hugging Face API error {response.status_code}: {response.text}"
-                            raise Exception(error_msg)
-                        
-                        # Get the generated image
-                        img_data = io.BytesIO(response.content)
-                        img_base64 = base64.b64encode(img_data.getvalue()).decode()
-                        part.image_url = f"data:image/png;base64,{img_base64}"
-                        part.status = "completed"
-                        logger.info(f"Successfully generated image for part {part.part_number}")
-                        
-                        # Save a local copy for debugging
-                        debug_img_path = f"debug_part_{part.part_number}.png"
-                        with open(debug_img_path, "wb") as f:
-                            f.write(base64.b64decode(img_base64))
-                        logger.info(f"Saved debug image to {debug_img_path}")
-                        
-                    except Exception as img_gen_error:
-                        logger.error(f"Image generation failed: {str(img_gen_error)}")
-                        part.status = f"error: {str(img_gen_error)}"
-                        continue
-                            
-                except Exception as e:
-                    logger.error(f"Unexpected error generating image for part {part.part_number}: {str(e)}")
-                    part.status = f"error: {str(e)}"
-                    
-                finally:
-                    # Clean up the temporary file
-                    if temp_img_path and os.path.exists(temp_img_path):
-                        try:
-                            os.remove(temp_img_path)
-                        except Exception as e:
-                            logger.warning(f"Failed to remove temporary file {temp_img_path}: {str(e)}")
+            # Generate a single image for the entire story
+            # Use the first part's prompt or create a general one
+            image_prompt = story.parts[0].image_prompt if story.parts else f"{story.title}, children's book illustration"
             
-            # Update story status based on parts
-            if all(part.status == "completed" for part in story.parts):
+            temp_img_path = None
+            generated_image_url = None
+            
+            try:
+                # Create a temporary file for the face image
+                temp_img_path = f"temp_face_{uuid.uuid4()}.png"
+                face_image.save(temp_img_path, format='PNG')
+                
+                # Generate image using Hugging Face API
+                logger.info(f"Generating story image with prompt: {image_prompt}")
+                
+                # Enhance the prompt to ensure face is visible
+                enhanced_prompt = (
+                    f"{image_prompt} "
+                    "High quality, detailed, professional illustration, children's book style, "
+                    "vibrant colors, magical atmosphere, clear facial features, full body shot"
+                )
+                
+                # Prepare the request data
+                with open(temp_img_path, "rb") as img_file:
+                    base64_image = base64.b64encode(img_file.read()).decode('utf-8')
+                
+                data = {
+                    "inputs": {
+                        "prompt": enhanced_prompt,
+                        "init_image": f"data:image/png;base64,{base64_image}",
+                        "strength": 0.7,
+                        "guidance_scale": 7.5,
+                        "num_inference_steps": 40,
+                        "negative_prompt": (
+                            "blurry, low quality, distorted, deformed, text, watermark, "
+                            "multiple faces, cropped faces, bad anatomy, extra limbs"
+                        )
+                    }
+                }
+                
+                # Call Hugging Face API
+                response = requests.post(
+                    HF_API_URL,
+                    headers=HF_HEADERS,
+                    json=data,
+                    timeout=120
+                )
+                
+                if response.status_code != 200:
+                    error_msg = f"Hugging Face API error {response.status_code}: {response.text}"
+                    raise Exception(error_msg)
+                
+                # Get the generated image
+                img_data = io.BytesIO(response.content)
+                img_base64 = base64.b64encode(img_data.getvalue()).decode()
+                generated_image_url = f"data:image/png;base64,{img_base64}"
+                
+                # Save a local copy for debugging
+                debug_img_path = f"debug_story_image.png"
+                with open(debug_img_path, "wb") as f:
+                    f.write(base64.b64decode(img_base64))
+                logger.info(f"Saved debug image to {debug_img_path}")
+                
+            except Exception as img_gen_error:
+                logger.error(f"Image generation failed: {str(img_gen_error)}")
+                story.status = "failed"
+                story.error = f"Image generation failed: {str(img_gen_error)}"
+                return story
+                
+            finally:
+                # Clean up the temporary file
+                if temp_img_path and os.path.exists(temp_img_path):
+                    try:
+                        os.remove(temp_img_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to remove temporary file {temp_img_path}: {str(e)}")
+            
+            # If we successfully generated an image, assign it to all story parts
+            if generated_image_url:
+                for part in story.parts:
+                    part.image_url = generated_image_url
+                    part.status = "completed"
                 story.status = "completed"
-            elif any(part.status == "completed" for part in story.parts):
-                story.status = "completed_with_errors"
             else:
                 story.status = "failed"
+                story.error = "Failed to generate story image"
             
             return story
                 

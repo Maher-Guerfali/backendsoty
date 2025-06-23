@@ -1,88 +1,81 @@
 #!/usr/bin/env bash
-# Exit on error
-set -e
+# Exit on error and print commands as they're executed
+set -ex
+
+# Set default values
+export PORT=${PORT:-10000}
+export HOST=0.0.0.0
+export PYTHONUNBUFFERED=1
 
 # Enable script debugging
-set -x
+echo "=== Starting server on port $PORT ==="
 
-# Use Render's PORT environment variable or default to 10000
-export PORT=${PORT:-10000}
-
-# Set host to 0.0.0.0 to make it accessible from outside the container
-export HOST=0.0.0.0
-
-# Make sure the script has execute permissions
-chmod +x "$0"
+# Check for required commands
+for cmd in python3 pip; do
+    if ! command -v $cmd &> /dev/null; then
+        echo "Error: $cmd is not installed"
+        exit 1
+    fi
+done
 
 # Log environment for debugging
 echo "=== Environment Variables ==="
 printenv | sort
 echo "==========================="
 
-# Log the port being used
-echo "Starting server on port: $PORT"
-
-# Install dependencies with verbose output
-echo "Installing dependencies..."
-pip install -r requirements.txt --no-cache-dir
-
-# Create logs directory if it doesn't exist
-echo "Creating logs directory..."
+# Create logs directory
 mkdir -p logs
 
-# Set up environment for Render
-echo "Setting up environment..."
+# Install dependencies
+echo "Installing dependencies..."
+pip install --upgrade pip
+pip install -r requirements.txt --no-cache-dir
 
-# Ensure environment variables are loaded
-echo "Loading environment variables..."
-[ -f ".env" ] && source .env
+# Load environment variables if .env exists
+if [ -f ".env" ]; then
+    echo "Loading .env file..."
+    set -o allexport
+    source .env
+    set +o allexport
+fi
 
 # Check required environment variables
-echo "Checking required environment variables..."
-if [ -z "$GROQ_API_KEY" ]; then
-    echo "Error: GROQ_API_KEY is not set"
-    exit 1
-fi
+for var in GROQ_API_KEY REPLICATE_API_TOKEN; do
+    if [ -z "${!var}" ]; then
+        echo "Error: $var is not set"
+        exit 1
+    fi
+done
 
-if [ -z "$REPLICATE_API_TOKEN" ]; then
-    echo "Error: REPLICATE_API_TOKEN is not set"
-    exit 1
-fi
-
-# Set default values for optional variables
+# Set defaults for optional variables
 export FRONTEND_URL=${FRONTEND_URL:-https://mystoria-alpha.vercel.app}
 export ENVIRONMENT=${ENVIRONMENT:-production}
 
-# Debug: Show listening ports before starting
-echo "=== Checking listening ports before start ==="
-netstat -tuln || true
-lsof -i :$PORT || true
-echo "============================================"
-
-# Start the server
-echo "Starting FastAPI server on 0.0.0.0:$PORT..."
-
-# Print current directory and list files for debugging
+# Debug info
+echo "=== System Info ==="
+python3 --version
+pip --version
 echo "Current directory: $(pwd)"
 echo "Files in current directory:"
 ls -la
+echo "==================="
 
-# Check if uvicorn.json exists and is readable
+# Check if uvicorn.json exists
 if [ ! -f "uvicorn.json" ]; then
     echo "Error: uvicorn.json not found in $(pwd)"
     exit 1
 fi
 
-# Run the FastAPI app with logging
-echo "Starting Uvicorn with config: $(pwd)/uvicorn.json"
+# Start the server
+echo "Starting Uvicorn..."
 exec uvicorn app.main:app \
-    --host 0.0.0.0 \
+    --host $HOST \
     --port $PORT \
-    --log-level debug \
-    --log-config $(pwd)/uvicorn.json \
     --workers 1 \
+    --log-level info \
+    --log-config uvicorn.json \
     --access-log \
     --proxy-headers \
-    --forwarded-allow-ips="*" \
-    --root-path="/" \
-    2>&1 | tee logs/app.log
+    --timeout-keep-alive 30 \
+    --no-server-header \
+    2>&1 | tee -a logs/app.log
